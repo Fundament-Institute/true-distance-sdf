@@ -1,0 +1,16 @@
+[package]
+name = "true-distance-sdf"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytemuck = "1.25.0"
+euclid = "0.22.14"
+eyre = "0.6.12"
+futures-lite = "2.6.1"
+itertools = "0.14.0"
+num-traits = "0.2.19"
+partial_application = "0.2.1"
+wgpu = "29"
+winit = "0.30.8"
+zerocopy = "0.8.48"
