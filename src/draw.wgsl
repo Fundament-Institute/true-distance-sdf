@@ -472,7 +472,8 @@ fn tdf(input: VertexOutput) -> @location(0) vec4f {
   let band_width: f32 = 8;
   let pos = input.uv;
   let dist = mag(pos - shapefunc(pos));
-  let inside = shapeField(pos) < 0;
+  let field = shapeField(pos);
+  let inside = field < 0;
   let in_line = dist <= (line_width / 2);
   let in_band = dist % (band_width * 2) >= band_width;
   let fade = select(32 * log2(dist), 128, dist < 1);
@@ -485,7 +486,7 @@ fn tdf(input: VertexOutput) -> @location(0) vec4f {
   let r = select(primary_colorval, secondary_colorval, inside);
   let b = select(secondary_colorval, primary_colorval, inside);
   let g = secondary_colorval;
-  //return srgb_to_linear_vec4(vec4f(pos.x, pos.y, 0.0, 1.0));
+  //return srgb_to_linear_vec4(vec4f(field, 0.0, 0.0, 1.0));
   return srgb_to_linear_vec4(vec4f(r / 255.0, g / 255.0, b / 255.0, a / 255.0));
 }
 
