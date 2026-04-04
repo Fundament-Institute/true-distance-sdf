@@ -177,6 +177,7 @@ type Real = f32;
     Copy,
     Debug,
     PartialEq,
+    PartialOrd,
     bytemuck::Pod,
     bytemuck::Zeroable,
     zerocopy::IntoBytes,
@@ -186,6 +187,14 @@ type Real = f32;
 pub struct Complex {
     x: f32,
     y: f32,
+}
+
+impl Eq for Complex {}
+
+impl Ord for Complex {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other).unwrap()
+    }
 }
 
 impl From<[f32; 2]> for Complex {
@@ -798,27 +807,27 @@ pub fn quartic_findRoots(
     }
 }
 
-#[inline]
-fn sdf_empty() -> impl Fn(Complex) -> Real {
+#[inline(always)]
+pub fn sdf_empty() -> impl Fn(Complex) -> Real {
     move |_: Complex| Real::MAX
 }
-#[inline]
-fn sdf_point(p: Complex) -> impl Fn(Complex) -> Real {
+#[inline(always)]
+pub fn sdf_point(p: Complex) -> impl Fn(Complex) -> Real {
     move |pos: Complex| (pos - p).mag()
 }
-#[inline]
-fn sdf_disk(d: Circle) -> impl Fn(Complex) -> Real {
+#[inline(always)]
+pub fn sdf_disk(d: Circle) -> impl Fn(Complex) -> Real {
     move |pos: Complex| (pos - d.center).mag() - d.radius
 }
-#[inline]
-fn sdf_halfPlane(hp: HalfPlane) -> impl Fn(Complex) -> Real {
+#[inline(always)]
+pub fn sdf_halfPlane(hp: HalfPlane) -> impl Fn(Complex) -> Real {
     move |pos: Complex| {
         pos.y
             .mul_add(hp.normal.y, pos.x.mul_add(hp.normal.x, -hp.shift))
     }
 }
 
-trait SDF
+pub trait SDF
 where
     Self: Fn(Complex) -> Real + Sized,
 {
@@ -944,7 +953,7 @@ impl Bezier2o2d {
             Complex::new(Real::NAN, Real::NAN)
         }
     }
-    fn twoBezier2o2dsIntersect(self, bez1: Bezier2o2d) -> [Complex; 4] {
+    pub fn twoBezier2o2dsIntersect(self, bez1: Bezier2o2d) -> [Complex; 4] {
         // find t vals such that (Bezier2o2d.eval bez0 t) gives a point on bez1
         let a1div2 = bez1.1 - bez1.0;
         let a2 = (bez1.2 - bez1.1 - a1div2);
@@ -1055,7 +1064,19 @@ impl Bezier2o2d {
         [self.filteredEval(t0), self.filteredEval(t1)]
     }
 
-    fn bezier2o2dLineIntersect(self, hp: HalfPlane) -> [Complex; 2] {
+    #[inline]
+    pub fn sdf(self) -> impl Fn(Complex) -> f32 {
+        move |pos: Complex| {
+            let (t0, t1) = self.findLocallyNearestTVals(pos);
+
+            let p0 = self.eval(t0.max(0.0).min(1.0));
+            let p1 = self.eval(t1.max(0.0).min(1.0));
+
+            sdf_point(p0)(pos).min(sdf_point(p1)(pos))
+        }
+    }
+
+    pub fn bezier2o2dLineIntersect(self, hp: HalfPlane) -> [Complex; 2] {
         let proj = Bezier2o1d(
             dot2dAccurate(hp.normal, self.0),
             dot2dAccurate(hp.normal, self.1),
@@ -1065,7 +1086,7 @@ impl Bezier2o2d {
         [self.filteredEval(p.0), self.filteredEval(p.1)]
     }
 
-    fn bezier2o2dCircleIntersect(self, circ: Circle) -> [Complex; 4] {
+    pub fn bezier2o2dCircleIntersect(self, circ: Circle) -> [Complex; 4] {
         let v0div2 = self.1 - self.0;
         let adiv2 = self.2 - self.1 - v0div2;
         let v0 = (v0div2 + v0div2);
@@ -1095,7 +1116,7 @@ impl Bezier2o2d {
     }
 }
 
-fn twoCirclesIntersect(c0: Circle, c1: Circle) -> [Complex; 2] {
+pub fn twoCirclesIntersect(c0: Circle, c1: Circle) -> [Complex; 2] {
     let centerDiff = (c1.center - c0.center);
     let rcd = centerDiff.recipMag();
     let r0 = c0.radius * rcd;
@@ -1108,7 +1129,7 @@ fn twoCirclesIntersect(c0: Circle, c1: Circle) -> [Complex; 2] {
     ]
 }
 
-fn circleLineIntersect(circ: Circle, hp: HalfPlane) -> [Complex; 2] {
+pub fn circleLineIntersect(circ: Circle, hp: HalfPlane) -> [Complex; 2] {
     let perpOffset = -sdf_halfPlane(hp)(circ.center);
     let z = Complex::new(
         perpOffset,
@@ -1128,7 +1149,7 @@ fn halfPlaneToLineFunc(hp: HalfPlane, x: Real) -> Real {
     )
 }
 
-fn twoLinesIntersect(a: HalfPlane, b: HalfPlane) -> Complex {
+pub fn twoLinesIntersect(a: HalfPlane, b: HalfPlane) -> Complex {
     a.normal.mul(Complex::new(
         a.shift,
         halfPlaneToLineFunc(
@@ -1141,7 +1162,7 @@ fn twoLinesIntersect(a: HalfPlane, b: HalfPlane) -> Complex {
     ))
 }
 
-fn isBoundaryPoint(f: impl Fn(Complex) -> Real, pos: Complex) -> bool {
+pub fn isBoundaryPoint(f: &impl Fn(Complex) -> Real, pos: Complex) -> bool {
     f(pos).abs() <= BOUNDARY_THRESHOLD
 }
 
