@@ -278,7 +278,7 @@ fn findLocallyNearestTVals(bez: Bezier2o2d, pos: vec2f) -> vec2f {
   let c1divc3 = c1 / c3;
   let c2divn3c3 = c2divn3 / c3;
   let d0divn2 = fma(c2divn3c3, fma(c2divn3c3, c2divn3c3, c1divc3 * (- 0.5)), c0divc3 * (- 0.5),);
-  let d1divn3 = fma(c2divn3c3, c2divn3c3, c1divc3 * (- 1 / 3));
+  let d1divn3 = fma(c2divn3c3, c2divn3c3, c1divc3 * (- 1.0 / 3.0));
   let tdep = premulDepressedCubic_findRoots_fast(d0divn2, d1divn3);
   var t0 = tdep.x + c2divn3c3;
   let t1 = tdep.z + c2divn3c3;
