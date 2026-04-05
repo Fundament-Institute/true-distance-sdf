@@ -1,4 +1,5 @@
 #![allow(non_snake_case)]
+#![allow(dead_code)]
 
 use core::f64;
 
@@ -172,6 +173,7 @@ module Complex = {
 
 type Real = f32;
 
+#[allow(clippy::derive_ord_xor_partial_ord)]
 #[derive(
     Clone,
     Copy,
@@ -311,7 +313,7 @@ where
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, PartialEq, PartialOrd, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct Circle {
     pub center: Complex,
@@ -320,7 +322,7 @@ pub struct Circle {
 
 impl AsArrayRef<3> for Circle {}
 
-#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, PartialEq, PartialOrd, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct HalfPlane {
     pub normal: Complex,
@@ -329,13 +331,13 @@ pub struct HalfPlane {
 
 impl AsArrayRef<3> for HalfPlane {}
 
-#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, PartialEq, PartialOrd, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct Bezier2o1d(pub Real, pub Real, pub Real);
 
 impl AsArrayRef<3> for Bezier2o1d {}
 
-#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, PartialEq, PartialOrd, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct Bezier2o2d(pub Complex, pub Complex, pub Complex);
 
@@ -665,7 +667,7 @@ fn premulDepressedCubic_findRoots_fast(c0divn2: Real, c1divn3: Real) -> (Real, R
                 //(cbrt (c0divn2 + c0divn2), Real::NAN, Real::NAN) // Even in f32 with subnormal-flushing and no fma, abs(exact answer) in this codepath is always < 2 ** -20.6, so we just round to 0.
                 (0.0, Real::NAN, Real::NAN) // If you're finding a quadratic Bezier parameter without rescaling, you need > 2 ** 17.6 px between control points before this produces 1/4 px of error.
             } else {
-                let u = u.min(1.0).max(-1.0); // This line only does anything if u was computed inaccurately AND 2 roots were close together, but I don't know a way to rule that out.
+                let u = u.clamp(-1.0, 1.0); // This line only does anything if u was computed inaccurately AND 2 roots were close together, but I don't know a way to rule that out.
                 let a = trisectApprox(u);
                 let b = (-a).mul_add(a * 3.0, 3.0).sqrt(); // Not needed for the most-positive root so can be skipped if you only need that.
                 //let v = acos u * from_fraction 1 3;
@@ -902,7 +904,7 @@ fn scale_add(scale: Real, p: Complex, c: Complex) -> Complex {
 
 fn diskNBP(disk: Circle) -> impl Fn(Complex) -> Complex {
     move |pos: Complex| {
-        let v = (pos - disk.center);
+        let v = pos - disk.center;
         let q = disk.radius * v.recipMag();
         if q.is_finite() {
             scale_add(q, v, disk.center)
@@ -936,7 +938,7 @@ impl Bezier2o2d {
     }
     fn eval(self, t: Real) -> Complex {
         let v0div2 = self.1 - self.0;
-        Self::evalPreproc(self.0, (v0div2 + v0div2), (self.2 - self.1 - v0div2), t)
+        Self::evalPreproc(self.0, v0div2 + v0div2, self.2 - self.1 - v0div2, t)
     }
     fn filteredEval(self, t: Real) -> Complex {
         if 0.0 < t && t < 1.0 {
@@ -956,7 +958,7 @@ impl Bezier2o2d {
     pub fn twoBezier2o2dsIntersect(self, bez1: Bezier2o2d) -> [Complex; 4] {
         // find t vals such that (Bezier2o2d.eval bez0 t) gives a point on bez1
         let a1div2 = bez1.1 - bez1.0;
-        let a2 = (bez1.2 - bez1.1 - a1div2);
+        let a2 = bez1.2 - bez1.1 - a1div2;
         if a2.x == 0.0 && a2.y == 0.0 {
             // bez1 has no acceleration. In this case, the usual quartic equation collapses to 0 == 0.
             // There are 2 options for handling this: nudge bez1.1 towards an endpoint and proceed with the quartic, or use our quadratic-bezier-line intersector.
@@ -972,11 +974,11 @@ impl Bezier2o2d {
                 Complex::new(Real::NAN, Real::NAN),
             ]
         } else {
-            let a0 = (bez1.0 - self.0);
-            let a1 = (a1div2 + a1div2);
+            let a0 = bez1.0 - self.0;
+            let a1 = a1div2 + a1div2;
             let p1div2 = self.1 - self.0;
-            let p1 = (p1div2 + p1div2);
-            let p2 = (self.2 - self.1 - p1div2);
+            let p1 = p1div2 + p1div2;
+            let p2 = self.2 - self.1 - p1div2;
             // Solve a2 s^2 + a1 s + a0 - p2 t^2 - p1 t == 0 for t without computing s
             // matrix([[a2x, a1x, a0x-p2x*t^2-p1x*t, 0], [0, a2x, a1x, a0x-p2x*t^2-p1x*t], [a2y, a1y, a0y-p2y*t^2-p1y*t, 0], [0, a2y, a1y, a0y-p2y*t^2-p1y*t]]).det() == 0
             let a0a1 = det2x2Accurate(a0, a1);
@@ -1001,8 +1003,8 @@ impl Bezier2o2d {
                 ts,
             ); // might be unnecessary?
             let vdiv2 = self.1 - self.0;
-            let adiv2 = (self.2 - self.1 - vdiv2);
-            let v = (vdiv2 + vdiv2);
+            let adiv2 = self.2 - self.1 - vdiv2;
+            let v = vdiv2 + vdiv2;
             //let bez1EndpointDiff = bez1.2 Complex.- bez1.0 in // for secondary filtering
             //let sideInfo = det2x2Accurate(bez1EndpointDiff, a1) in // for secondary filtering
             //let finish t = Real.(
@@ -1024,9 +1026,8 @@ impl Bezier2o2d {
 
     fn findLocallyNearestTVals(self, pos: Complex) -> (f32, f32) {
         let v0div2 = self.1 - self.0;
-        let adiv2 = (self.2 - self.1 - v0div2);
+        let adiv2 = self.2 - self.1 - v0div2;
         let relstart = self.0 - pos;
-        let v0div2 = v0div2;
 
         //let v0 = v0div2 Complex.+ v0div2
         // find roots of d/dt (Complex.squaredMag (pos - eval bez t))/4
@@ -1069,8 +1070,8 @@ impl Bezier2o2d {
         move |pos: Complex| {
             let (t0, t1) = self.findLocallyNearestTVals(pos);
 
-            let p0 = self.eval(t0.max(0.0).min(1.0));
-            let p1 = self.eval(t1.max(0.0).min(1.0));
+            let p0 = self.eval(t0.clamp(0.0, 1.0));
+            let p1 = self.eval(t1.clamp(0.0, 1.0));
 
             sdf_point(p0)(pos).min(sdf_point(p1)(pos))
         }
@@ -1089,10 +1090,9 @@ impl Bezier2o2d {
     pub fn bezier2o2dCircleIntersect(self, circ: Circle) -> [Complex; 4] {
         let v0div2 = self.1 - self.0;
         let adiv2 = self.2 - self.1 - v0div2;
-        let v0 = (v0div2 + v0div2);
+        let v0 = v0div2 + v0div2;
         let a = adiv2 + adiv2;
-        let adiv2 = adiv2;
-        let relstart = (self.0 - circ.center);
+        let relstart = self.0 - circ.center;
         let negRadiusSquared = -(circ.radius * circ.radius);
         let c0 = relstart
             .y
@@ -1117,7 +1117,7 @@ impl Bezier2o2d {
 }
 
 pub fn twoCirclesIntersect(c0: Circle, c1: Circle) -> [Complex; 2] {
-    let centerDiff = (c1.center - c0.center);
+    let centerDiff = c1.center - c0.center;
     let rcd = centerDiff.recipMag();
     let r0 = c0.radius * rcd;
     let r1 = c1.radius * rcd;
@@ -1184,26 +1184,22 @@ pub fn impliedPoints(
     let cpoints = circles
         .iter()
         .cartesian_product(circles.iter())
-        .map(|(a, b)| twoCirclesIntersect(*a, *b))
-        .flatten();
+        .flat_map(|(a, b)| twoCirclesIntersect(*a, *b));
 
     let bezcirc = bezs
         .iter()
         .cartesian_product(circles.iter())
-        .map(|(a, b)| a.bezier2o2dCircleIntersect(*b))
-        .flatten();
+        .flat_map(|(a, b)| a.bezier2o2dCircleIntersect(*b));
 
     let bezline = bezs
         .iter()
         .cartesian_product(lines.iter())
-        .map(|(a, b)| a.bezier2o2dLineIntersect(*b))
-        .flatten();
+        .flat_map(|(a, b)| a.bezier2o2dLineIntersect(*b));
 
     let circline = circles
         .iter()
         .cartesian_product(lines.iter())
-        .map(|(a, b)| circleLineIntersect(*a, *b))
-        .flatten();
+        .flat_map(|(a, b)| circleLineIntersect(*a, *b));
 
     bezs.iter()
         .map(|b| b.0)
@@ -1218,8 +1214,7 @@ pub fn impliedPoints(
         .chain(
             bezs.iter()
                 .cartesian_product(bezs.iter())
-                .map(|(a, b)| a.twoBezier2o2dsIntersect(*b))
-                .flatten(),
+                .flat_map(|(a, b)| a.twoBezier2o2dsIntersect(*b)),
         )
         .chain(bezcirc)
         .chain(bezline)

@@ -127,6 +127,8 @@ fn from_fraction(n: i32, d: i32) -> f32 {
 }
 
 fn rcbrtPositiveNormalApprox(x: f32) -> f32 {
+  return pow(x, - 1.0 / 3.0);
+
   // u32 division by constant 3 is compiled to multiply-then-shift by many compilers, so this should be division-free.
   // If you care about ulp error instead of relative error, use 0x54a21d29 instead.
   let y = bitcast<f32>(0x54a208f8u - (bitcast<u32>(x) / 3));
@@ -143,6 +145,8 @@ fn rcbrtPositiveNormalApprox(x: f32) -> f32 {
 }
 
 fn rcbrtPositiveNormal(x: f32) -> f32 {
+  return pow(x, - 1.0 / 3.0);
+
   let y1 = bitcast<f32>(0x54a232a8u - (bitcast<u32>(x) / 3));
   let p1 = fma((x * y1), y1 * y1, - 1.0);
   let y = fma(fma(p1, from_fraction(2, 9), from_fraction(- 1, 3)), p1 * y1, y1);
@@ -345,25 +349,8 @@ fn op_intersect(l: f32, r: f32) -> f32 {
 }
 
 fn unary_op(x: f32, op: u32) -> f32 {
-  let r = select(x, - x, (op & OP_NEGATE) != 0);
-  return select(r, abs(r), (op & OP_HOLLOW) != 0);
-}
-
-fn shapeSDF(pos: vec2f, op: u32, i: u32) -> f32 {
-  switch op & OP_MASK {
-    case SHAPE_CIRCLE: {
-      return unary_op(psdf_disk(Circle(vec2f(shapes[i + 1], shapes[i + 2]), shapes[i + 3]), pos), op);
-    }
-    case SHAPE_BEZIER: {
-      return unary_op(psdf_bez(Bezier2o2d(vec2f(shapes[i + 1], shapes[i + 2]), vec2f(shapes[i + 3], shapes[i + 4]), vec2f(shapes[i + 5], shapes[i + 6])), pos), op);
-    }
-    case SHAPE_LINE: {
-      return unary_op(psdf_halfplane(HalfPlane(vec2f(shapes[i + 1], shapes[i + 2]), shapes[i + 3]), pos), op);
-    }
-    default : {
-      return 0.0;
-    }
-  }
+  let r = select(x, op_negate(x), (op & OP_NEGATE) != 0);
+  return select(r, op_hollow(r), (op & OP_HOLLOW) != 0);
 }
 
 fn shapeField(pos: vec2f) -> f32 {
@@ -376,7 +363,7 @@ fn shapeField(pos: vec2f) -> f32 {
       case OP_UNION, OP_INTERSECT: {
         let r = stack[len - 1];
         let l = stack[len - 2];
-        stack[len - 2] = select(op_intersect(l, r), op_union(l, r), (op & OP_MASK) == OP_UNION);
+        stack[len - 2] = unary_op(select(op_intersect(l, r), op_union(l, r), (op & OP_MASK) == OP_UNION), op);
         len -= 1;
         i += 1;
       }
@@ -406,8 +393,8 @@ fn shapeField(pos: vec2f) -> f32 {
 
 const BOUNDARY_THRESHOLD: f32 = 0.25;
 
-fn isBoundaryPoint(opshape: u32, i: u32, pos: vec2f) -> bool {
-  return abs(shapeSDF(pos, opshape, i)) <= BOUNDARY_THRESHOLD;
+fn isBoundaryPoint(pos: vec2f) -> bool {
+  return abs(shapeField(pos)) <= BOUNDARY_THRESHOLD;
 }
 
 fn shapefunc(pos: vec2f) -> vec2f {
@@ -441,7 +428,7 @@ fn shapefunc(pos: vec2f) -> vec2f {
         p = pt[0];
 
         let dist = mag_sq(pt[1] - pos);
-        if isBoundaryPoint(opshape, i, pt[1]) && dist < lastdist_sq {
+        if isBoundaryPoint(pt[1]) && dist < lastdist_sq {
           lastdist_sq = dist;
           nearest = pt[1];
         }
@@ -455,7 +442,7 @@ fn shapefunc(pos: vec2f) -> vec2f {
     }
 
     let dist = mag_sq(p - pos);
-    if isBoundaryPoint(opshape, i, p) && dist < lastdist_sq {
+    if isBoundaryPoint(p) && dist < lastdist_sq {
       lastdist_sq = dist;
       nearest = p;
     }
