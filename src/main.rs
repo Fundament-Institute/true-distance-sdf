@@ -884,9 +884,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );*/
 
     //u (i (n (u (n (hp exampleHalfPlanes[0])) (hp exampleHalfPlanes[1]))) (i (n (disk exampleDisks[0])) (disk exampleDisks[1]))) (bez exampleBezier2o2ds[0])
-    let composite = ((-((-hp1) | hp2)) & ((-c1) & c2)) | b1;
+    //let composite = ((-((-hp1) | hp2)) & ((-c1) & c2)) | b1;
 
-    //let composite = -((-hp1) | hp2);
+    let composite = b1;
     let composite2 = composite.clone();
     let psdf = move |pos: Complex| composite2.eval(pos);
     //let mut points2 = Vec::from_iter(points2);
