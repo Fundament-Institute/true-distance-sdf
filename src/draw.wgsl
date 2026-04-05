@@ -141,7 +141,7 @@ fn rcbrtPositiveNormalApprox(x: f32) -> f32 {
   // 4 fewer flops than the |err|<1ulp version. 3 fewer flops than the |err|<2ulp version.
   // A minimax polynomial over the appropriate interval would be better & might allow saving a flop, but this is good enough.
 
-  return fma(fma(p, fma(p, fma(p, from_fraction(35, 243), from_fraction(- 14, 81)), from_fraction(2, 9),), from_fraction(- 1, 3),), p * y, y);
+  return fma(fma(p, fma(p, fma(p, 35.0 / 243.0, - 14.0 / 81.0), 2.0 / 9.0), -1.0 / 3.0), p * y, y);
 }
 
 fn rcbrtPositiveNormal(x: f32) -> f32 {
@@ -149,10 +149,10 @@ fn rcbrtPositiveNormal(x: f32) -> f32 {
 
   let y1 = bitcast<f32>(0x54a232a8u - (bitcast<u32>(x) / 3));
   let p1 = fma((x * y1), y1 * y1, - 1.0);
-  let y = fma(fma(p1, from_fraction(2, 9), from_fraction(- 1, 3)), p1 * y1, y1);
+  let y = fma(fma(p1, 2.0 / 9.0, - 1.0 / 3.0), p1 * y1, y1);
   let p = fma(x * y, y * y, - 1.0);
   //f32.(fma p (y * from_fraction (-1) 3) y) // Slightly biased toward 0. -1.77ulp < err < +0.96ulp. -2**-22.68 < relerr < 2**-23.51.
-  return fma(fma(p, from_fraction(2, 9), from_fraction(- 1, 3)), p * y, y);
+  return fma(fma(p, 2.0 / 9.0, - 1.0 / 3.0), p * y, y);
   // -0.99ulp < err < +0.99ulp. -2**-23.44 < relerr < 2**-23.44.
 }
 
@@ -220,8 +220,7 @@ fn premulDepressedCubic_findRoots_fast(c0divn2: f32, c1divn3: f32) -> vec3f {
       // If you're finding a quadratic Bezier parameter without rescaling, you need > 2 ** 17.6 px between control points before this produces 1/4 px of error.
     }
     else {
-      let u = max(min(u, 1.0), - 1.0);
-      // This line only does anything if u was computed inaccurately AND 2 roots were close together, but I don't know a way to rule that out.
+      let u = max(min(u, 1.0), - 1.0); // This line only does anything if u was computed inaccurately AND 2 roots were close together, but I don't know a way to rule that out.
       let a = trisectApprox(u);
       let b = sqrt(fma(- a, a * 3.0, 3.0));
       // Not needed for the most-positive root so can be skipped if you only need that.
@@ -326,8 +325,8 @@ fn psdf_disk(d: Circle, pos: vec2f) -> f32 {
 
 fn psdf_bez(bez: Bezier2o2d, pos: vec2f) -> f32 {
   let t = findLocallyNearestTVals(bez, pos);
-  let p0 = eval_bezier(bez, max(min(t.x, 1), 0));
-  let p1 = eval_bezier(bez, max(min(t.y, 1), 0));
+  let p0 = eval_bezier(bez, min(max(t.x, 0.0), 1.0));
+  let p1 = eval_bezier(bez, min(max(t.y, 0.0), 1.0));
 
   return min(psdf_point(p0, pos), psdf_point(p1, pos));
 }

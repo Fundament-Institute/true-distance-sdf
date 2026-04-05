@@ -684,7 +684,7 @@ fn premulDepressedCubic_findRoots_fast(c0divn2: Real, c1divn3: Real) -> (Real, R
 fn premulDepressedCubic_findRoots_stopOverflow(c0divn2: Real, c1divn3: Real) -> (Real, Real, Real) {
     let scaleExponent = c0divn2.premulDepressedCubic_computeScaleExponent(c1divn3);
     let scale = Real::pow2i(-scaleExponent);
-    let sc0divn2 = c0divn2 * (scale * scale) * scale;
+    let sc0divn2 = (c0divn2 * scale) * (scale * scale);
     let sc1divn3 = c1divn3 * (scale * scale);
     let unscale = Real::pow2i(scaleExponent);
     let (a, b, c) = premulDepressedCubic_findRoots_fast(sc0divn2, sc1divn3);
