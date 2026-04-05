@@ -650,7 +650,7 @@ fn premulDepressedCubic_findRoots_fast(c0divn2: Real, c1divn3: Real) -> (Real, R
             // sqrt of a positive finite number is normal in all supported formats. No need for rcbrt to handle subnormals.
             let u = q.rcbrtPositiveNormalApprox();
             (
-                u.copysign(c0divn2 * q.mul_add(u, c1divn3)),
+                u.copysign(c0divn2) * q.mul_add(u, c1divn3),
                 Real::NAN,
                 Real::NAN,
             )
@@ -674,7 +674,7 @@ fn premulDepressedCubic_findRoots_fast(c0divn2: Real, c1divn3: Real) -> (Real, R
                 //let a = cos v in // Use this instead if your hardware makes acos, cos, and sin particularly fast & accurate
                 //let b = sin v * sqrt (f64 3);
                 let (sa, sb) = (s * a, s * b);
-                (sa + sa, sb - sa, -(sb - sa))
+                (sa + sa, sb - sa, - sb - sa)
             }
         }
     }
