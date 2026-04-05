@@ -203,7 +203,7 @@ fn premulDepressedCubic_findRoots_fast(c0divn2: f32, c1divn3: f32) -> vec3f {
     let q = abs(c0divn2) + sqrt(d);
     // sqrt of a positive finite number is normal in all supported formats. No need for rcbrt to handle subnormals.
     let u = rcbrtPositiveNormalApprox(q);
-    return vec3f(fakecopysign(u, c0divn2 * fma(q, u, c1divn3)), MAX_F32, MAX_F32);
+    return vec3f(fakecopysign(u, c0divn2) * fma(q, u, c1divn3), MAX_F32, MAX_F32);
     // If you're on a platform that provides a fast rcbrt that preserves sign, you can skip a step with this:
     //let q = c0divn2 + fakecopysign (sqrt d) c0divn2;
     //let u = rcbrt q in (u * q.mul_add(u, c1divn3), Real::NAN, Real::NAN)
@@ -229,7 +229,7 @@ fn premulDepressedCubic_findRoots_fast(c0divn2: f32, c1divn3: f32) -> vec3f {
       //let b = sin v * sqrt (f64 3);
       let sa = s * a;
       let sb = s * b;
-      return vec3f(sa + sa, sb - sa, - (sb - sa));
+      return vec3f(sa + sa, sb - sa, - sb - sa);
     }
   }
 }
