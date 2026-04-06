@@ -31,6 +31,7 @@ pub mod sdf;
 struct Driver {
     adapter: wgpu::Adapter,
     shader: wgpu::ShaderModule,
+    compute_shader: wgpu::ShaderModule,
     queue: wgpu::Queue,
     device: wgpu::Device,
     qset: wgpu::QuerySet,
@@ -60,7 +61,7 @@ impl Driver {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("wgpu Device"),
-                required_features: wgpu::Features::TIMESTAMP_QUERY,
+                required_features: wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::IMMEDIATES,
                 required_limits: wgpu::Limits::default(),
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
                 trace: wgpu::Trace::Off,
@@ -69,10 +70,16 @@ impl Driver {
             .await?;
 
         let s = std::borrow::Cow::Borrowed(include_str!("draw.wgsl"));
+        let cs = std::borrow::Cow::Borrowed(include_str!("points.wgsl"));
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("draw.wgsl"),
             source: wgpu::ShaderSource::Wgsl(s),
+        });
+
+        let compute_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("points.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(cs),
         });
 
         let qset = device.create_query_set(&wgpu::QuerySetDescriptor {
@@ -99,6 +106,7 @@ impl Driver {
             device,
             queue,
             shader,
+            compute_shader,
             qset,
             resolve_buffer,
             destination_buffer,
@@ -884,9 +892,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );*/
 
     //u (i (n (u (n (hp exampleHalfPlanes[0])) (hp exampleHalfPlanes[1]))) (i (n (disk exampleDisks[0])) (disk exampleDisks[1]))) (bez exampleBezier2o2ds[0])
-    //let composite = ((-((-hp1) | hp2)) & ((-c1) & c2)) | b1;
+    let composite = ((-((-hp1) | hp2)) & ((-c1) & c2)) | b1;
 
-    let composite = b1;
+    //let composite = b1;
     let composite2 = composite.clone();
     let psdf = move |pos: Complex| composite2.eval(pos);
     //let mut points2 = Vec::from_iter(points2);

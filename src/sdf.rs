@@ -667,14 +667,14 @@ fn premulDepressedCubic_findRoots_fast(c0divn2: Real, c1divn3: Real) -> (Real, R
                 //(cbrt (c0divn2 + c0divn2), Real::NAN, Real::NAN) // Even in f32 with subnormal-flushing and no fma, abs(exact answer) in this codepath is always < 2 ** -20.6, so we just round to 0.
                 (0.0, Real::NAN, Real::NAN) // If you're finding a quadratic Bezier parameter without rescaling, you need > 2 ** 17.6 px between control points before this produces 1/4 px of error.
             } else {
-                let u = u.clamp(-1.0, 1.0); // This line only does anything if u was computed inaccurately AND 2 roots were close together, but I don't know a way to rule that out.
+                let u = u.max(-1.0).min(1.0); // This line only does anything if u was computed inaccurately AND 2 roots were close together, but I don't know a way to rule that out.
                 let a = trisectApprox(u);
                 let b = (-a).mul_add(a * 3.0, 3.0).sqrt(); // Not needed for the most-positive root so can be skipped if you only need that.
                 //let v = acos u * from_fraction 1 3;
                 //let a = cos v in // Use this instead if your hardware makes acos, cos, and sin particularly fast & accurate
                 //let b = sin v * sqrt (f64 3);
                 let (sa, sb) = (s * a, s * b);
-                (sa + sa, sb - sa, - sb - sa)
+                (sa + sa, sb - sa, -sb - sa)
             }
         }
     }
@@ -1070,8 +1070,8 @@ impl Bezier2o2d {
         move |pos: Complex| {
             let (t0, t1) = self.findLocallyNearestTVals(pos);
 
-            let p0 = self.eval(t0.clamp(0.0, 1.0));
-            let p1 = self.eval(t1.clamp(0.0, 1.0));
+            let p0 = self.eval(t0.max(0.0).min(1.0));
+            let p1 = self.eval(t1.max(0.0).min(1.0));
 
             sdf_point(p0)(pos).min(sdf_point(p1)(pos))
         }

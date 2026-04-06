@@ -26,7 +26,7 @@ fn isFinite(x: f32) -> bool {
 }
 
 @group(0) @binding(0)
-var<storage> shapes: array<f32>;
+var<storage, read> shapes: array<f32>;
 
 // TODO: make this a quadtree, where nodes are marked with u32, the first byte used to count the number of points if it's a leaf.
 //union QuadNode {
@@ -141,7 +141,7 @@ fn rcbrtPositiveNormalApprox(x: f32) -> f32 {
   // 4 fewer flops than the |err|<1ulp version. 3 fewer flops than the |err|<2ulp version.
   // A minimax polynomial over the appropriate interval would be better & might allow saving a flop, but this is good enough.
 
-  return fma(fma(p, fma(p, fma(p, 35.0 / 243.0, - 14.0 / 81.0), 2.0 / 9.0), -1.0 / 3.0), p * y, y);
+  return fma(fma(p, fma(p, fma(p, 35.0 / 243.0, - 14.0 / 81.0), 2.0 / 9.0), - 1.0 / 3.0), p * y, y);
 }
 
 fn rcbrtPositiveNormal(x: f32) -> f32 {
@@ -220,7 +220,8 @@ fn premulDepressedCubic_findRoots_fast(c0divn2: f32, c1divn3: f32) -> vec3f {
       // If you're finding a quadratic Bezier parameter without rescaling, you need > 2 ** 17.6 px between control points before this produces 1/4 px of error.
     }
     else {
-      let u = max(min(u, 1.0), - 1.0); // This line only does anything if u was computed inaccurately AND 2 roots were close together, but I don't know a way to rule that out.
+      let u = max(min(u, 1.0), - 1.0);
+      // This line only does anything if u was computed inaccurately AND 2 roots were close together, but I don't know a way to rule that out.
       let a = trisectApprox(u);
       let b = sqrt(fma(- a, a * 3.0, 3.0));
       // Not needed for the most-positive root so can be skipped if you only need that.
