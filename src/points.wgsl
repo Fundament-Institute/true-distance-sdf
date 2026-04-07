@@ -212,6 +212,7 @@ fn quartic_eval(c0: f32, c1: f32, c2: f32, c3: f32, c4: f32, t: f32) -> f32 {
 }
 
 fn rcbrtPositiveNormalApprox(x: f32) -> f32 {
+    // The extra performance here doesn't seem to be necessary
     return pow(x, - 1.0 / 3.0);
 
     // u32 division by constant 3 is compiled to multiply-then-shift by many compilers, so this should be division-free.

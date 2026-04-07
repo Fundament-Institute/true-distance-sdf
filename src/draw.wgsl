@@ -131,6 +131,7 @@ fn from_fraction(n: i32, d: i32) -> f32 {
 }
 
 fn rcbrtPositiveNormalApprox(x: f32) -> f32 {
+  // The extra performance here doesn't seem to be necessary
   return pow(x, - 1.0 / 3.0);
 
   // u32 division by constant 3 is compiled to multiply-then-shift by many compilers, so this should be division-free.
@@ -149,6 +150,7 @@ fn rcbrtPositiveNormalApprox(x: f32) -> f32 {
 }
 
 fn rcbrtPositiveNormal(x: f32) -> f32 {
+  // The extra performance here doesn't seem to be necessary
   return pow(x, - 1.0 / 3.0);
 
   let y1 = bitcast<f32>(0x54a232a8u - (bitcast<u32>(x) / 3));
@@ -432,7 +434,7 @@ fn shapefunc(pos: vec2f) -> vec2f {
         p = pt[0];
 
         let dist = mag_sq(pt[1] - pos);
-        if isBoundaryPoint(pt[1]) && dist < lastdist_sq {
+        if dist < lastdist_sq && isBoundaryPoint(pt[1]) {
           lastdist_sq = dist;
           nearest = pt[1];
         }
@@ -446,7 +448,7 @@ fn shapefunc(pos: vec2f) -> vec2f {
     }
 
     let dist = mag_sq(p - pos);
-    if isBoundaryPoint(p) && dist < lastdist_sq {
+    if dist < lastdist_sq && isBoundaryPoint(p) {
       lastdist_sq = dist;
       nearest = p;
     }
