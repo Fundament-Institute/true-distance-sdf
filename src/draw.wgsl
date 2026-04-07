@@ -36,8 +36,12 @@ var<storage, read> shapes: array<f32>;
 @group(0) @binding(1)
 var<storage, read> points: array<vec2f>;
 
-@group(0) @binding(2)
-var<uniform> extent: vec4f;
+struct Config {
+  dim: vec2f,
+  pos: vec2f,
+}
+
+var<immediate> config: Config;
 
 struct VertexOutput {
   @invariant @builtin(position) position: vec4<f32>,
@@ -60,7 +64,7 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
   var pos = array<vec2f, 3>(vec2f(- 1.0, 3.0), vec2f(3.0, - 1.0), vec2f(- 1.0, - 1.0));
   let outpos = vec4f(pos[idx], 0.0, 1.0);
   let uv = pos[idx] * 0.5 + 0.5;
-  return VertexOutput(outpos, (uv - vec2f(0.5, 0.5)) * extent.xy + extent.zw);
+  return VertexOutput(outpos, (uv - vec2f(0.5, 0.5)) * config.dim + config.pos);
 }
 
 // see https://pharr.org/matt/blog/2019/11/03/difference-of-floats or "Further Analysis of Kahan's Algorithm for the Accurate Computation of 2x2 Determinants"

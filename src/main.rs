@@ -1,3 +1,4 @@
+use std::num::NonZero;
 use std::sync::Arc;
 
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
@@ -23,14 +24,18 @@ use winit::platform::windows::EventLoopBuilderExtWindows;
 #[cfg(target_os = "linux")]
 use winit::platform::x11::EventLoopBuilderExtX11;
 
-use crate::sdf::{Bezier2o2d, Complex, sdf_disk, sdf_halfPlane};
+use crate::sdf::Complex;
 
 pub mod sdf;
+
+pub const fn triangle_count(n: u32) -> u32 {
+    return (n * (1 + n)) / 2;
+}
 
 #[derive(Debug)]
 struct Driver {
     adapter: wgpu::Adapter,
-    shader: wgpu::ShaderModule,
+    draw_shader: wgpu::ShaderModule,
     compute_shader: wgpu::ShaderModule,
     queue: wgpu::Queue,
     device: wgpu::Device,
@@ -39,7 +44,7 @@ struct Driver {
     destination_buffer: wgpu::Buffer,
 }
 
-const NUM_QUERIES: u32 = 2;
+const NUM_QUERIES: u32 = 4;
 
 impl Driver {
     pub async fn new(
@@ -57,12 +62,15 @@ impl Driver {
             eprintln!("Adapter does not support timestamps")
         }
 
+        let mut required_limits = wgpu::Limits::default();
+        required_limits.max_immediate_size = size_of::<[f32; 4]>() as u32;
+
         // Create the logical device and command queue
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("wgpu Device"),
                 required_features: wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::IMMEDIATES,
-                required_limits: wgpu::Limits::default(),
+                required_limits,
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
                 trace: wgpu::Trace::Off,
                 experimental_features: ExperimentalFeatures::disabled(),
@@ -72,7 +80,7 @@ impl Driver {
         let s = std::borrow::Cow::Borrowed(include_str!("draw.wgsl"));
         let cs = std::borrow::Cow::Borrowed(include_str!("points.wgsl"));
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let draw_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("draw.wgsl"),
             source: wgpu::ShaderSource::Wgsl(s),
         });
@@ -105,7 +113,7 @@ impl Driver {
             adapter,
             device,
             queue,
-            shader,
+            draw_shader,
             compute_shader,
             qset,
             resolve_buffer,
@@ -136,6 +144,164 @@ impl Driver {
 
         timestamps
     }
+
+    pub fn get_compute_pipeline(&self) -> (wgpu::ComputePipeline, wgpu::BindGroupLayout) {
+        let bind_group_layout =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("Compute Bind Group"),
+                    entries: &[
+                        BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 3,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                                has_dynamic_offset: false,
+                                min_binding_size: NonZero::new(size_of::<u32>() as u64),
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+
+        let layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Compute Pipeline"),
+                bind_group_layouts: &[Some(&bind_group_layout)],
+                immediate_size: 0,
+            });
+
+        let pipeline = self
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: None,
+                layout: Some(&layout),
+                module: &self.compute_shader,
+                entry_point: Some("implied_points"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
+        return (pipeline, bind_group_layout);
+    }
+
+    pub fn get_draw_pipeline(
+        &self,
+        format: wgpu::TextureFormat,
+    ) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
+        let bind_group_layout =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("Draw Bind Group"),
+                    entries: &[
+                        BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        /*BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::VERTEX,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: std::num::NonZero::<u64>::new(
+                                    size_of::<[f32; 4]>() as u64,
+                                ),
+                            },
+                            count: None,
+                        },*/
+                    ],
+                });
+
+        let layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Draw Pipeline"),
+                bind_group_layouts: &[Some(&bind_group_layout)],
+                immediate_size: size_of::<[f32; 4]>() as u32,
+            });
+
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: None,
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &self.draw_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &self.draw_shader,
+                    entry_point: Some("tdf"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    front_face: wgpu::FrontFace::Cw,
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+
+        return (pipeline, bind_group_layout);
+    }
 }
 
 #[derive(Debug)]
@@ -145,11 +311,14 @@ struct AppState {
     surface: wgpu::Surface<'static>,
     config: wgpu::wgt::SurfaceConfiguration<Vec<wgpu::TextureFormat>>,
     driver: Driver,
-    pipeline: wgpu::RenderPipeline,
-    group: wgpu::BindGroup,
+    draw_pipeline: wgpu::RenderPipeline,
+    draw_group: wgpu::BindGroup,
+    compute_pipeline: wgpu::ComputePipeline,
+    compute_group: wgpu::BindGroup,
     shapes: wgpu::Buffer,
     points: wgpu::Buffer,
-    extent: wgpu::Buffer,
+    atomic_offset: wgpu::Buffer,
+    shape_idx: wgpu::Buffer,
 }
 
 const BACKCOLOR: wgpu::Color = wgpu::Color {
@@ -172,7 +341,11 @@ pub fn srgb_to_linear<T: num_traits::Float>(c: T) -> T {
 }
 
 impl AppState {
-    pub(crate) fn draw(&mut self, mut encoder: wgpu::CommandEncoder) -> eyre::Result<()> {
+    pub(crate) fn draw(
+        &mut self,
+        mut encoder: wgpu::CommandEncoder,
+        offset: [f32; 2],
+    ) -> eyre::Result<()> {
         let frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(t) | CurrentSurfaceTexture::Suboptimal(t) => Ok(t),
             CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => return Ok(()),
@@ -194,6 +367,26 @@ impl AppState {
         //     bytemuck::cast_slice(self.clipdata.as_slice()),
         // );
 
+        {
+            encoder.clear_buffer(&self.atomic_offset, 0, Some(size_of::<u32>() as u64));
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Implied Points Pass"),
+                timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                    query_set: &self.driver.qset,
+                    beginning_of_pass_write_index: Some(2),
+                    end_of_pass_write_index: Some(3),
+                }),
+            });
+
+            pass.set_pipeline(&self.compute_pipeline);
+            pass.set_bind_group(0, &self.compute_group, &[]);
+            pass.dispatch_workgroups(
+                (triangle_count((self.shape_idx.size() / size_of::<f32>() as u64) as u32) / 128)
+                    + 1,
+                1,
+                1,
+            );
+        }
         {
             let mut backcolor = BACKCOLOR;
             if frame.texture.format().is_srgb() {
@@ -232,8 +425,20 @@ impl AppState {
                 1.0,
             );
 
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.group, &[]);
+            use zerocopy::IntoBytes;
+
+            pass.set_pipeline(&self.draw_pipeline);
+            pass.set_immediates(
+                0,
+                [
+                    self.config.width as f32,
+                    self.config.height as f32,
+                    offset[0],
+                    offset[1],
+                ]
+                .as_bytes(),
+            );
+            pass.set_bind_group(0, &self.draw_group, &[]);
             pass.draw(0..6, 0..1);
         }
 
@@ -330,6 +535,8 @@ enum ShapeOp {
     OpNegate = 8,
     OpHollow = 16,
 }
+
+const OP_MASK: u8 = ShapeOp::OpNegate as u8 - 1;
 
 #[derive(Clone, Debug)]
 pub struct CompositeField {
@@ -445,6 +652,7 @@ impl Shape {
         self.recurse_array(&mut v);
         v
     }
+
     #[inline]
     fn unary_op(op: u8, mut x: f32) -> f32 {
         if (op & ShapeOp::OpNegate as u8) != 0 {
@@ -468,7 +676,7 @@ impl Shape {
                 let r = f.r.eval(pos);
                 Self::unary_op(
                     f.op,
-                    if f.op & 0x7 == ShapeOp::OpUnion as u8 {
+                    if f.op & OP_MASK == ShapeOp::OpUnion as u8 {
                         l.min(r)
                     } else {
                         l.max(r)
@@ -485,6 +693,48 @@ impl CompositeField {
         self.r.recurse_array(v);
         v.push(bytemuck::cast(self.op as u32));
     }
+}
+
+// Gets a vector of indices pointing at the location of all shape primitives in a shape array
+pub fn get_indices(shapes: &[f32]) -> (Vec<u32>, u32) {
+    let mut i = 0;
+    let mut v = Vec::new();
+    let mut lines = 0;
+    let mut circles = 0;
+    let mut beziers = 0;
+
+    while i < shapes.len() {
+        let b = shapes[i].to_bits() as u8;
+
+        const UNION: u8 = ShapeOp::OpUnion as u8;
+        const INTERSECT: u8 = ShapeOp::OpIntersect as u8;
+        const BEZIER: u8 = ShapeOp::Bezier as u8;
+        const CIRCLE: u8 = ShapeOp::Circle as u8;
+        const HP: u8 = ShapeOp::HalfPlane as u8;
+
+        match b & OP_MASK {
+            UNION | INTERSECT => {
+                i += 1;
+            }
+            BEZIER => {
+                v.push(i as u32);
+                i += 7;
+                beziers += 1;
+            }
+            CIRCLE | HP => {
+                v.push(i as u32);
+                i += 4;
+                if b & OP_MASK == CIRCLE {
+                    circles += 1;
+                } else {
+                    lines += 1;
+                }
+            }
+            _ => panic!("Unknown shape!"),
+        }
+    }
+
+    (v, max_points(beziers, circles, lines))
 }
 
 struct App {
@@ -554,87 +804,6 @@ impl ApplicationHandler for App {
         config.view_formats.push(view_format);
         surface.configure(&driver.device, &config);
 
-        let bind_group_layout =
-            driver
-                .device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("Main Bind Group"),
-                    entries: &[
-                        BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        BindGroupLayoutEntry {
-                            binding: 2,
-                            visibility: wgpu::ShaderStages::VERTEX,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: std::num::NonZero::<u64>::new(
-                                    size_of::<[f32; 4]>() as u64,
-                                ),
-                            },
-                            count: None,
-                        },
-                    ],
-                });
-
-        let layout = driver
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Compositor Pipeline"),
-                bind_group_layouts: &[Some(&bind_group_layout)],
-                immediate_size: 0,
-            });
-
-        let pipeline = driver
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: None,
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &driver.shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &driver.shader,
-                    entry_point: Some("tdf"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: config.view_formats[0],
-                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    front_face: wgpu::FrontFace::Cw,
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            });
-
         use zerocopy::IntoBytes;
         let flatten = self.composite.to_array();
         let shapes = driver.device.create_buffer_init(&BufferInitDescriptor {
@@ -643,22 +812,19 @@ impl ApplicationHandler for App {
             contents: flatten.as_bytes(),
         });
 
+        let (shape_indexes, max_points) = get_indices(&flatten);
+        let blank_points: Vec<f32> = Vec::from_iter((0..(max_points * 2)).map(|_| f32::MAX));
+
         let points = driver.device.create_buffer_init(&BufferInitDescriptor {
             label: Some("Points"),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            contents: self.points.as_bytes(),
+            contents: blank_points.as_bytes(),
         });
 
-        let extent = driver.device.create_buffer_init(&BufferInitDescriptor {
-            label: Some("Extent"),
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-            contents: [
-                config.width as f32,
-                config.height as f32,
-                self.offset[0],
-                self.offset[1],
-            ]
-            .as_bytes(),
+        let atomic_offset = driver.device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("Atomic total offset"),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            contents: [0u32].as_bytes(),
         });
 
         /*let shapes = driver.device.create_buffer(&BufferDescriptor {
@@ -684,15 +850,50 @@ impl ApplicationHandler for App {
                 binding: 1,
                 resource: points.as_entire_binding(),
             },
-            BindGroupEntry {
+            /*BindGroupEntry {
                 binding: 2,
                 resource: extent.as_entire_binding(),
-            },
+            },*/
         ];
+
+        let (pipeline, bind_group_layout) = driver.get_draw_pipeline(config.view_formats[0]);
 
         let group = driver.device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &bind_group_layout,
             entries: &bindings,
+            label: None,
+        });
+
+        let shape_idx = driver.device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("Shape indexes"),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            contents: shape_indexes.as_bytes(),
+        });
+
+        let compute_bindings = [
+            BindGroupEntry {
+                binding: 0,
+                resource: shapes.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: points.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: shape_idx.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: atomic_offset.as_entire_binding(),
+            },
+        ];
+
+        let (compute_pipeline, compute_bind_group_layout) = driver.get_compute_pipeline();
+
+        let compute_group = driver.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &compute_bind_group_layout,
+            entries: &compute_bindings,
             label: None,
         });
 
@@ -706,11 +907,14 @@ impl ApplicationHandler for App {
             surface,
             driver,
             config,
-            pipeline,
+            draw_pipeline: pipeline,
             shapes,
             points,
-            group,
-            extent,
+            draw_group: group,
+            compute_pipeline,
+            compute_group,
+            shape_idx,
+            atomic_offset,
         });
     }
 
@@ -720,25 +924,12 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
-                use zerocopy::IntoBytes;
-
                 let state = self.state.as_mut().expect("resize event without a window");
 
                 let config = &mut state.config;
                 config.width = size.width;
                 config.height = size.height;
                 state.surface.configure(&state.driver.device, config);
-                state.driver.queue.write_buffer(
-                    &state.extent,
-                    0,
-                    [
-                        config.width as f32,
-                        config.height as f32,
-                        self.offset[0],
-                        self.offset[1],
-                    ]
-                    .as_bytes(),
-                );
                 state.window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
@@ -758,7 +949,7 @@ impl ApplicationHandler for App {
                             label: Some("Root Encoder"),
                         });
 
-                state.draw(encoder).expect("draw failure");
+                state.draw(encoder, self.offset).expect("draw failure");
                 let timestamps = state.driver.get_timestamps();
 
                 let diffns = ((timestamps[1] - timestamps[0]) as f32
@@ -773,22 +964,6 @@ impl ApplicationHandler for App {
                     if !self.lastpos.x.is_nan() && !self.lastpos.y.is_nan() {
                         self.offset[0] -= (position.x - self.lastpos.x) as f32;
                         self.offset[1] += (position.y - self.lastpos.y) as f32;
-
-                        if let Some(state) = &mut self.state {
-                            use zerocopy::IntoBytes;
-
-                            state.driver.queue.write_buffer(
-                                &state.extent,
-                                0,
-                                [
-                                    state.config.width as f32,
-                                    state.config.height as f32,
-                                    self.offset[0],
-                                    self.offset[1],
-                                ]
-                                .as_bytes(),
-                            );
-                        }
                     }
                     self.lastpos = position;
                 }
@@ -860,6 +1035,17 @@ impl From<&Shape> for sdf::Bezier2o2d {
     }
 }
 
+// Count all possible points from the types of intersections
+const fn max_points(beziers: u32, circles: u32, lines: u32) -> u32 {
+    beziers * 2 + // unconditional points
+    triangle_count(lines - 1) * 1 + // line-line intersection
+    triangle_count(circles - 1) * 2 + // circle-circle intersection
+    triangle_count(lines + circles - 1) * 2 + // line-circle intersection
+    triangle_count(beziers + lines - 1) * 2 + // bezier-line intersection
+    triangle_count(beziers + circles - 1) * 4 + // bezier-circle intersection
+    triangle_count(beziers - 1) * 4 // bezier-bezier intersection
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_family = "wasm")]
     console_error_panic_hook::set_once();
@@ -869,35 +1055,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let c1 = Shape::circle((-180.0, 0.0), 240.0);
     let c2 = Shape::circle((180.0, 0.0), 240.0);
     let b1 = Shape::bezier([(0.0, 320.0), (0.0, -640.0), (120.0, 320.0)]);
-
-    /*let b1b: Bezier2o2d = (&b1).into();
-    let psdf2 = (sdf_halfPlane((&hp1).into())
-        .negate()
-        .union(sdf_halfPlane((&hp2).into()))
-        .negate()
-        .intersection(
-            sdf_disk((&c1).into())
-                .negate()
-                .intersection(sdf_disk((&c2).into())),
-        ))
-    .union(b1b.sdf());
-
-    let points2 = Vec::from_iter(
-        sdf::impliedPoints(
-            &[(&b1).into()],
-            &[(&c1).into(), (&c2).into()],
-            &[(&hp1).into(), (&hp2).into()],
-        )
-        .filter(|x| sdf::isBoundaryPoint(&psdf2, *x)),
-    );*/
+    let b2 = Shape::bezier([(320.0, 0.0), (-640.0, 0.0), (320.0, 120.0)]);
 
     //u (i (n (u (n (hp exampleHalfPlanes[0])) (hp exampleHalfPlanes[1]))) (i (n (disk exampleDisks[0])) (disk exampleDisks[1]))) (bez exampleBezier2o2ds[0])
-    let composite = ((-((-hp1) | hp2)) & ((-c1) & c2)) | b1;
+    let composite = ((-((-hp1) | hp2)) & ((-c1) & c2)) | (b1 | b2);
 
     //let composite = b1;
     let composite2 = composite.clone();
     let psdf = move |pos: Complex| composite2.eval(pos);
-    //let mut points2 = Vec::from_iter(points2);
 
     let shapes = Vec::from_iter(composite.iter());
     println!("shapes: {shapes:?}");
@@ -905,10 +1070,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut points = Vec::from_iter(
         implied_points(composite.iter()).filter(|x| sdf::isBoundaryPoint(&psdf, *x)),
     );
-
-    //points.sort_unstable();
-    //points2.sort_unstable();
-    //assert_eq!(points, points2);
 
     if points.is_empty() {
         points.push(Complex::new(f32::MAX, f32::MAX));
