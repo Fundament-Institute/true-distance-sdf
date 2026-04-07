@@ -639,6 +639,7 @@ fn depressedQuartic_halleyOnceIfBetter(c0: Real, c1: Real, c2: Real, t: Real) ->
 // | In the 3-root case, the roots are sorted (most-positive, middle, most-negative).
 // | The middle root has the fewest significant bits. The most-positive root has the most.
 // | If any of the roots are good, the root in slot 0 is.
+#[allow(clippy::manual_clamp)]
 fn premulDepressedCubic_findRoots_fast(c0divn2: Real, c1divn3: Real) -> (Real, Real, Real) {
     let d = prodDiffAccurate(c0divn2, c0divn2, c1divn3 * c1divn3, c1divn3);
     if !d.is_finite() {
@@ -1066,6 +1067,7 @@ impl Bezier2o2d {
     }
 
     #[inline]
+    #[allow(clippy::manual_clamp)]
     pub fn sdf(self) -> impl Fn(Complex) -> f32 {
         move |pos: Complex| {
             let (t0, t1) = self.findLocallyNearestTVals(pos);

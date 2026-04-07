@@ -1435,6 +1435,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
+name = "rolling-stats"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f48d37da86a2b3e7a04b9514c2be259017995e48fbba9c8fc01c78ed4bd21812"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1760,6 +1769,7 @@ dependencies = [
  "itertools",
  "num-traits",
  "partial_application",
+ "rolling-stats",
  "wgpu",
  "winit",
  "zerocopy",

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::num::NonZero;
 use std::sync::Arc;
 
@@ -29,7 +31,7 @@ use crate::sdf::Complex;
 pub mod sdf;
 
 pub const fn triangle_count(n: u32) -> u32 {
-    return (n * (1 + n)) / 2;
+    (n * (1 + n)) / 2
 }
 
 #[derive(Debug)]
@@ -42,6 +44,7 @@ struct Driver {
     qset: wgpu::QuerySet,
     resolve_buffer: wgpu::Buffer,
     destination_buffer: wgpu::Buffer,
+    extract_points: wgpu::Buffer,
 }
 
 const NUM_QUERIES: u32 = 4;
@@ -62,8 +65,10 @@ impl Driver {
             eprintln!("Adapter does not support timestamps")
         }
 
-        let mut required_limits = wgpu::Limits::default();
-        required_limits.max_immediate_size = size_of::<[f32; 4]>() as u32;
+        let required_limits = wgpu::Limits {
+            max_immediate_size: size_of::<[f32; 4]>() as u32,
+            ..Default::default()
+        };
 
         // Create the logical device and command queue
         let (device, queue) = adapter
@@ -109,6 +114,12 @@ impl Driver {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         });
 
+        let extract_points = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("Debug Points buffer"),
+            contents: [0.0f32; 1024 * 2].as_bytes(),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        });
+
         Ok(Self {
             adapter,
             device,
@@ -118,6 +129,7 @@ impl Driver {
             qset,
             resolve_buffer,
             destination_buffer,
+            extract_points,
         })
     }
 
@@ -132,10 +144,7 @@ impl Driver {
         let timestamps = {
             let timestamp_view = self
                 .destination_buffer
-                .slice(
-                    ..(size_of::<u64>() as wgpu::BufferAddress
-                        * NUM_QUERIES as wgpu::BufferAddress),
-                )
+                .slice(..self.destination_buffer.size())
                 .get_mapped_range();
             bytemuck::cast_slice(&timestamp_view).to_vec()
         };
@@ -143,6 +152,27 @@ impl Driver {
         self.destination_buffer.unmap();
 
         timestamps
+    }
+
+    fn get_gpu_points(&self) -> Vec<Complex> {
+        self.extract_points
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |_| ());
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+
+        let points = {
+            let view = self
+                .extract_points
+                .slice(..self.extract_points.size())
+                .get_mapped_range();
+            bytemuck::cast_slice(&view).to_vec()
+        };
+
+        self.extract_points.unmap();
+
+        points
     }
 
     pub fn get_compute_pipeline(&self) -> (wgpu::ComputePipeline, wgpu::BindGroupLayout) {
@@ -213,7 +243,7 @@ impl Driver {
                 cache: None,
             });
 
-        return (pipeline, bind_group_layout);
+        (pipeline, bind_group_layout)
     }
 
     pub fn get_draw_pipeline(
@@ -300,7 +330,7 @@ impl Driver {
                 cache: None,
             });
 
-        return (pipeline, bind_group_layout);
+        (pipeline, bind_group_layout)
     }
 }
 
@@ -454,6 +484,13 @@ impl AppState {
             &self.driver.destination_buffer,
             0,
             self.driver.resolve_buffer.size(),
+        );
+        encoder.copy_buffer_to_buffer(
+            &self.points,
+            0,
+            &self.driver.extract_points,
+            0,
+            self.points.size(),
         );
         self.driver.queue.submit(Some(encoder.finish()));
         frame.present();
@@ -744,6 +781,8 @@ struct App {
     offset: [f32; 2],
     lastpos: PhysicalPosition<f64>,
     mousedown: bool,
+    draw_stats: rolling_stats::Stats<f32>,
+    compute_stats: rolling_stats::Stats<f32>,
 }
 
 impl ApplicationHandler for App {
@@ -817,7 +856,7 @@ impl ApplicationHandler for App {
 
         let points = driver.device.create_buffer_init(&BufferInitDescriptor {
             label: Some("Points"),
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             contents: blank_points.as_bytes(),
         });
 
@@ -952,12 +991,37 @@ impl ApplicationHandler for App {
                 state.draw(encoder, self.offset).expect("draw failure");
                 let timestamps = state.driver.get_timestamps();
 
-                let diffns = ((timestamps[1] - timestamps[0]) as f32
+                let diffms = ((timestamps[1] - timestamps[0]) as f32
                     * state.driver.queue.get_timestamp_period())
                     / 1000000.0;
+
+                let computediff = ((timestamps[3] - timestamps[2]) as f32
+                    * state.driver.queue.get_timestamp_period())
+                    / 1000000.0;
+
+                self.draw_stats.update(diffms);
+                self.compute_stats.update(computediff);
+
                 let name = env!("CARGO_CRATE_NAME");
-                window.set_title(format!("{name} - {diffns}ms").as_str());
+                window.set_title(
+                    format!(
+                        "{name} - {:.3}\u{00b1}{:.2}ms (draw) - {:.3}\u{00b1}{:.2}ms (compute)",
+                        self.draw_stats.mean,
+                        self.draw_stats.std_dev,
+                        self.compute_stats.mean,
+                        self.compute_stats.std_dev
+                    )
+                    .as_str(),
+                );
                 window.request_redraw();
+
+                /*let mut pointcheck = state.driver.get_gpu_points();
+                pointcheck.resize(self.points.len() + 5, Complex::zeroed());
+                pointcheck.sort();
+                self.points.sort();
+                println!("-----------------");
+                println!("{pointcheck:?}");
+                println!("{:?}", self.points);*/
             }
             WindowEvent::CursorMoved { position, .. } => {
                 if self.mousedown {
@@ -1036,6 +1100,7 @@ impl From<&Shape> for sdf::Bezier2o2d {
 }
 
 // Count all possible points from the types of intersections
+#[allow(clippy::identity_op)]
 const fn max_points(beziers: u32, circles: u32, lines: u32) -> u32 {
     beziers * 2 + // unconditional points
     triangle_count(lines - 1) * 1 + // line-line intersection
@@ -1082,6 +1147,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         lastpos: PhysicalPosition { x: 0.0, y: 0.0 },
         offset: [0.0, 0.0],
         mousedown: false,
+        draw_stats: Default::default(),
+        compute_stats: Default::default(),
     };
 
     event_loop.run_app(&mut app)?;
