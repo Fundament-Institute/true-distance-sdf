@@ -747,36 +747,51 @@ impl Shape {
         }
     }
 
-    pub fn nbp(&self, root: &Shape, pos: Complex, target: &mut Complex) {
+    pub fn nbp(
+        &self,
+        root: &Shape,
+        pos: Complex,
+        nearest: &mut Complex,
+        points: &[(sdf::Complex, (usize, usize))],
+    ) {
+        for (p, _) in points {
+            let dist = (*p - pos).squaredMag();
+
+            // We can skip isBoundaryPoint here because the intersection points are prefiltered
+            if dist < (*nearest - pos).squaredMag() {
+                *nearest = *p;
+            }
+        }
+
         match self {
             Self::Circle(circle, _, _) => {
                 let p = sdf::diskNBP(*circle)(pos);
-                if (p - pos).squaredMag() < (*target - pos).squaredMag()
+                if (p - pos).squaredMag() < (*nearest - pos).squaredMag()
                     && is_boundary_point(root, p)
                 {
-                    *target = p;
+                    *nearest = p;
                 }
             }
             Self::HalfPlane(half_plane, _, _) => {
                 let p = sdf::halfPlaneNBP(*half_plane)(pos);
-                if (p - pos).squaredMag() < (*target - pos).squaredMag()
+                if (p - pos).squaredMag() < (*nearest - pos).squaredMag()
                     && is_boundary_point(root, p)
                 {
-                    *target = p;
+                    *nearest = p;
                 }
             }
             Self::Bezier(b, _, _) => {
                 for p in b.findLocallyNearestPoints(pos) {
-                    if (p - pos).squaredMag() < (*target - pos).squaredMag()
+                    if (p - pos).squaredMag() < (*nearest - pos).squaredMag()
                         && is_boundary_point(root, p)
                     {
-                        *target = p;
+                        *nearest = p;
                     }
                 }
             }
             Self::Composite(f, _) => {
-                f.l.nbp(root, pos, target);
-                f.r.nbp(root, pos, target);
+                f.l.nbp(root, pos, nearest, points);
+                f.r.nbp(root, pos, nearest, points);
             }
         }
     }
@@ -942,6 +957,8 @@ struct App {
     mousedown: bool,
     draw_stats: rolling_stats::Stats<f32>,
     compute_stats: rolling_stats::Stats<f32>,
+    quad_stats: rolling_stats::Stats<f32>,
+    quad_v: Vec<u32>,
 }
 
 impl ApplicationHandler for App {
@@ -953,7 +970,7 @@ impl ApplicationHandler for App {
         #[cfg(not(target_family = "wasm"))]
         let window_attributes = WindowAttributes::default()
             .with_title(env!("CARGO_CRATE_NAME"))
-            .with_inner_size(PhysicalSize::new(600, 600))
+            .with_inner_size(PhysicalSize::new(650, 550))
             .with_resizable(true);
         #[cfg(target_family = "wasm")]
         let window_attributes = WindowAttributes::default()
@@ -1029,21 +1046,24 @@ impl ApplicationHandler for App {
         use euclid::default::Point2D;
         use euclid::default::Size2D;
 
-        let mut quad_v: Vec<u32> = Vec::new();
+        self.quad_v.resize(1 << 17, 0);
+        let timer = std::time::Instant::now();
         build_quadtree(
             Box2D::from_origin_and_size(
                 Point2D::new(config.width as f32 * -0.5, config.height as f32 * -0.5),
                 Size2D::new(config.width as f32, config.height as f32),
             ),
-            &mut quad_v,
+            &mut self.quad_v,
             &self.composite,
             &self.points,
         );
-        quad_v.resize(1 << 17, 0);
+        let diff = std::time::Instant::now() - timer;
+        self.quad_stats.update(diff.as_secs_f32() * 1000.0);
+
         let quadtree = driver.device.create_buffer_init(&BufferInitDescriptor {
             label: Some("Quadtree"),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            contents: quad_v.as_bytes(),
+            contents: self.quad_v.as_bytes(),
         });
 
         /*let shapes = driver.device.create_buffer(&BufferDescriptor {
@@ -1157,21 +1177,25 @@ impl ApplicationHandler for App {
                     use euclid::default::Size2D;
                     use zerocopy::IntoBytes;
 
-                    let mut quad_v: Vec<u32> = Vec::new();
+                    self.quad_v.clear();
+
+                    let timer = std::time::Instant::now();
                     build_quadtree(
                         Box2D::from_origin_and_size(
                             Point2D::new(config.width as f32 * -0.5, config.height as f32 * -0.5),
                             Size2D::new(config.width as f32, config.height as f32),
                         ),
-                        &mut quad_v,
+                        &mut self.quad_v,
                         &self.composite,
                         &self.points,
                     );
+                    let diff = std::time::Instant::now() - timer;
+                    self.quad_stats.update(diff.as_secs_f32() * 1000.0);
 
                     state
                         .driver
                         .queue
-                        .write_buffer(&state.quadtree, 0, quad_v.as_bytes());
+                        .write_buffer(&state.quadtree, 0, self.quad_v.as_bytes());
                 }
                 state.window.request_redraw();
             }
@@ -1209,15 +1233,18 @@ impl ApplicationHandler for App {
                 let name = env!("CARGO_CRATE_NAME");
                 window.set_title(
                     format!(
-                        "{name} - {:.3}\u{00b1}{:.2}ms (draw) - {:.3}\u{00b1}{:.2}ms (compute)",
+                        "{:.3}\u{00b1}{:.2}ms (draw) - {:.3}\u{00b1}{:.2}ms (compute) - {:.3}\u{00b1}{:.2}ms (quad)",
                         self.draw_stats.mean,
                         self.draw_stats.std_dev,
                         self.compute_stats.mean,
-                        self.compute_stats.std_dev
+                        self.compute_stats.std_dev,
+                        self.quad_stats.mean,
+                        self.quad_stats.std_dev
                     )
                     .as_str(),
                 );
-                window.request_redraw();
+
+                state.window.request_redraw();
 
                 /*let mut pointcheck = state.driver.get_gpu_points();
                 pointcheck.resize(self.points.len() + 5, Complex::zeroed());
@@ -1234,6 +1261,10 @@ impl ApplicationHandler for App {
                         self.offset[1] += (position.y - self.lastpos.y) as f32;
                     }
                     self.lastpos = position;
+
+                    if let Some(state) = &self.state {
+                        state.window.request_redraw();
+                    }
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -1397,11 +1428,15 @@ pub fn build_quadtree(
 ) -> u32 {
     use euclid::default::Box2D;
     use euclid::default::Point2D;
-
+    const MIN_SIZE: f32 = 100.0;
     let centroid = area.center();
     let mut nearest = Complex::new(f32::MAX, f32::MAX);
-    sdf.nbp(&sdf, centroid.into(), &mut nearest);
 
+    if centroid.distance_to(Point2D::new(285.0, 205.0)) < 80.0 {
+        nearest = nearest;
+    }
+
+    sdf.nbp(&sdf, centroid.into(), &mut nearest, points);
     let trimmed = sdf.trim_shape(
         sdf::Complex::new(centroid.x, centroid.y),
         nearest,
@@ -1412,7 +1447,8 @@ pub fn build_quadtree(
     let idx = v.len() as u32;
 
     if let Some(s) = &trimmed
-        && ((area.height() > 2.0 && area.width() > 2.0 && is_large_shape(s)) || v.is_empty())
+        && ((area.height() > MIN_SIZE && area.width() > MIN_SIZE && is_large_shape(s))
+            || v.is_empty())
     {
         let quad = area.size() * 0.5;
         let topleft = area.min;
@@ -1429,10 +1465,9 @@ pub fn build_quadtree(
 
         v.extend_from_slice(&[0, 0, 0, 0]);
 
-        let mut i = idx as usize;
-        for quadrant in q {
-            v[i] = build_quadtree(quadrant, v, &s, points);
-            i += 1;
+        let begin = idx as usize;
+        for i in (begin..begin + 4).rev() {
+            v[i] = build_quadtree(q[i - begin], v, &s, points);
         }
 
         idx
@@ -1460,7 +1495,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //u (i (n (u (n (hp exampleHalfPlanes[0])) (hp exampleHalfPlanes[1]))) (i (n (disk exampleDisks[0])) (disk exampleDisks[1]))) (bez exampleBezier2o2ds[0])
     let mut composite = ((-((-hp1) | hp2)) & ((-c1) & c2)) | (b1 | b2);
 
-    //let mut composite = ((-c1) & c2) | c3;
+    //let mut composite = ((-((-hp1) | hp2)) & ((-c1) & c2));
     //let shapes = Vec::from_iter(composite.iter());
     //println!("shapes: {shapes:?}");
     let flatten = composite.to_array();
@@ -1479,6 +1514,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mousedown: false,
         draw_stats: Default::default(),
         compute_stats: Default::default(),
+        quad_stats: Default::default(),
+        quad_v: Vec::new(),
     };
 
     event_loop.run_app(&mut app)?;

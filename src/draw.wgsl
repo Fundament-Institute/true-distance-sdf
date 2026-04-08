@@ -601,7 +601,7 @@ fn traverse(pos: vec2f) -> vec2f {
 
     idx = quadtree[idx + child];
     if idx == 0 {
-      // shouldn't happen if quadtree is valid
+      // TODO: shouldn't happen if quadtree is valid
       break;
     }
   }
