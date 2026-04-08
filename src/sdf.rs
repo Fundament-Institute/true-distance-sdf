@@ -233,7 +233,7 @@ impl std::ops::Add for Complex {
     }
 }
 
-const BOUNDARY_THRESHOLD: Real = 0.25; // Max distance from boundary to be considered "on the boundary". One could imagine choosing this differently or even dynamically, but here's a guess.
+pub const BOUNDARY_THRESHOLD: Real = 0.25; // Max distance from boundary to be considered "on the boundary". One could imagine choosing this differently or even dynamically, but here's a guess.
 
 const fn keepFinite(backup: Real, preferred: Real) -> Real {
     if preferred.is_finite() {
@@ -903,7 +903,7 @@ fn scale_add(scale: Real, p: Complex, c: Complex) -> Complex {
     Complex::new(scale.mul_add(p.x, c.x), scale.mul_add(p.y, c.y))
 }
 
-fn diskNBP(disk: Circle) -> impl Fn(Complex) -> Complex {
+pub fn diskNBP(disk: Circle) -> impl Fn(Complex) -> Complex {
     move |pos: Complex| {
         let v = pos - disk.center;
         let q = disk.radius * v.recipMag();
@@ -917,7 +917,7 @@ fn diskNBP(disk: Circle) -> impl Fn(Complex) -> Complex {
     }
 }
 
-fn halfPlaneNBP(hp: HalfPlane) -> impl Fn(Complex) -> Complex {
+pub fn halfPlaneNBP(hp: HalfPlane) -> impl Fn(Complex) -> Complex {
     move |pos: Complex| scale_add(-sdf_halfPlane(hp)(pos), hp.normal, pos)
 }
 
@@ -1061,7 +1061,7 @@ impl Bezier2o2d {
         )
     }
 
-    fn findLocallyNearestPoints(self, pos: Complex) -> [Complex; 2] {
+    pub fn findLocallyNearestPoints(self, pos: Complex) -> [Complex; 2] {
         let (t0, t1) = self.findLocallyNearestTVals(pos);
         [self.filteredEval(t0), self.filteredEval(t1)]
     }

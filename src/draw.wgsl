@@ -28,13 +28,11 @@ fn isFinite(x: f32) -> bool {
 @group(0) @binding(0)
 var<storage, read> shapes: array<f32>;
 
-// TODO: make this a quadtree, where nodes are marked with u32, the first byte used to count the number of points if it's a leaf.
-//union QuadNode {
-//  u32 nodes[4];
-//  f32[2] points*;
-//}
 @group(0) @binding(1)
 var<storage, read> points: array<vec2f>;
+
+@group(0) @binding(2)
+var<storage, read> quadtree: array<u32>;
 
 struct Config {
   dim: vec2f,
@@ -459,12 +457,168 @@ fn shapefunc(pos: vec2f) -> vec2f {
   return nearest;
 }
 
+fn indirect_shapeField(pos: vec2f, start: u32) -> f32 {
+  let end = start + quadtree[start];
+  var stack = array<f32, 32>();
+  var len = 0;
+
+  for (var idx = start + 1; idx < end; idx++) {
+    let i = quadtree[idx];
+    let op = bitcast<u32>(shapes[i]);
+    switch op & OP_MASK {
+      case OP_UNION, OP_INTERSECT: {
+        let r = stack[len - 1];
+        let l = stack[len - 2];
+        stack[len - 2] = unary_op(select(op_intersect(l, r), op_union(l, r), (op & OP_MASK) == OP_UNION), op);
+        len -= 1;
+      }
+      case SHAPE_CIRCLE: {
+        stack[len] = unary_op(psdf_disk(Circle(vec2f(shapes[i + 1], shapes[i + 2]), shapes[i + 3]), pos), op);
+        len += 1;
+      }
+      case SHAPE_BEZIER: {
+        stack[len] = unary_op(psdf_bez(Bezier2o2d(vec2f(shapes[i + 1], shapes[i + 2]), vec2f(shapes[i + 3], shapes[i + 4]), vec2f(shapes[i + 5], shapes[i + 6])), pos), op);
+        len += 1;
+      }
+      case SHAPE_LINE: {
+        stack[len] = unary_op(psdf_halfplane(HalfPlane(vec2f(shapes[i + 1], shapes[i + 2]), shapes[i + 3]), pos), op);
+        len += 1;
+      }
+      default : {
+        return 0.0;
+      }
+    }
+  }
+
+  return stack[0];
+}
+
+fn indirect_isBoundaryPoint(pos: vec2f, start: u32) -> bool {
+  return abs(indirect_shapeField(pos, start)) <= BOUNDARY_THRESHOLD;
+}
+
+fn indirect_shapefunc(pos: vec2f, start: u32) -> vec2f {
+  let end = start + 1 + quadtree[start];
+
+  var nearest = vec2f(MAX_F32, MAX_F32);
+  var lastdist_sq = MAX_F32;
+  for (var i = 0u; i < arrayLength(&points); i++) {
+    let dist = mag_sq(points[i] - pos);
+
+    // We can skip isBoundaryPoint here because the intersection points are prefiltered
+    if dist < lastdist_sq {
+      lastdist_sq = dist;
+      nearest = points[i];
+    }
+  }
+
+  var p = vec2f(MAX_F32, MAX_F32);
+
+  for (var idx = start + 1; idx < end; idx++) {
+    let i = quadtree[idx];
+    let opshape = bitcast<u32>(shapes[i]);
+
+    switch opshape & OP_MASK {
+      case OP_UNION, OP_INTERSECT: {
+        continue;
+      }
+      case SHAPE_CIRCLE: {
+        p = diskNBP(Circle(vec2f(shapes[i + 1], shapes[i + 2]), shapes[i + 3]), pos);
+      }
+      case SHAPE_BEZIER: {
+        let pt = findLocallyNearestPoints(Bezier2o2d(vec2f(shapes[i + 1], shapes[i + 2]), vec2f(shapes[i + 3], shapes[i + 4]), vec2f(shapes[i + 5], shapes[i + 6])), pos);
+        p = pt[0];
+
+        let dist = mag_sq(pt[1] - pos);
+        if dist < lastdist_sq && isBoundaryPoint(pt[1]) {
+          lastdist_sq = dist;
+          nearest = pt[1];
+        }
+      }
+      case SHAPE_LINE: {
+        p = halfPlaneNBP(HalfPlane(vec2f(shapes[i + 1], shapes[i + 2]), shapes[i + 3]), pos);
+      }
+      default : {
+        return vec2f(MAX_F32, MAX_F32);
+      }
+    }
+
+    let dist = mag_sq(p - pos);
+    if dist < lastdist_sq && isBoundaryPoint(p) {
+      lastdist_sq = dist;
+      nearest = p;
+    }
+  }
+
+  return nearest;
+}
+
+const QUAD_CHILD: u32 = (1u << 31u);
+
+fn debug_viz(start: u32) -> vec4f {
+  let end = start + quadtree[start] + 1;
+  var colors = array(vec3f(0.0, 0.0, 0.0), vec3f(0.0, 0.0, 0.0), vec3f(0.0, 0.0, 0.0));
+
+  for (var idx = start + 1; idx < end; idx++) {
+    let i = quadtree[idx];
+    let opshape = bitcast<u32>(shapes[i]);
+    if ((opshape & OP_MASK) > 1) {
+      if i < 4 {
+        colors[0].r = 1.0;
+      }
+      else if i < 8 {
+        colors[1].g = 1.0;
+      }
+      else {
+        colors[2].b = 1.0;
+      }
+    }
+  }
+
+  return vec4f(colors[0] + colors[1] + colors[2], 1.0);
+}
+
+fn traverse(pos: vec2f) -> vec2f {
+  var dim = config.dim;
+  var idx = 0u;
+  var offset = config.dim * - 0.5;
+
+  //debug
+  let flip = vec2f(pos.x, pos.y);
+
+  while (idx < arrayLength(&quadtree)) {
+    dim *= 0.5;
+    let p = flip;
+    let child = select(0u, 1u, p.x > offset.x + dim.x) | select(0u, 2u, p.y > offset.y + dim.y);
+    offset.x += dim.x * f32(child & 1);
+    offset.y += dim.y * f32((child & 2) >> 1);
+
+    if (quadtree[idx + child] & QUAD_CHILD) != 0 {
+      //return debug_viz(quadtree[idx + child] & (~QUAD_CHILD));
+      return indirect_shapefunc(pos, quadtree[idx + child] & (~QUAD_CHILD));
+      //return shapefunc(pos);
+    }
+
+    idx = quadtree[idx + child];
+    if idx == 0 {
+      // shouldn't happen if quadtree is valid
+      break;
+    }
+  }
+
+  return vec2f(0.0);
+}
+
 @fragment
 fn tdf(input: VertexOutput) -> @location(0) vec4f {
   let line_width: f32 = 1.25;
   let band_width: f32 = 8;
   let pos = input.uv;
-  let dist = mag(pos - shapefunc(pos));
+  //return vec4f(pos.x / 400.0, pos.y / 300.0, 0, 1);
+  //return traverse(pos);
+
+  //let dist = mag(pos - shapefunc(pos));
+  let dist = mag(pos - traverse(pos));
   let field = shapeField(pos);
   let inside = field < 0;
   let in_line = dist <= (line_width / 2);

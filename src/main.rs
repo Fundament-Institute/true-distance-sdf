@@ -1,11 +1,15 @@
 #![allow(dead_code)]
 
+use core::f32;
+use std::collections::HashSet;
 use std::num::NonZero;
 use std::sync::Arc;
 
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
+#[cfg(not(target_family = "wasm"))]
+use winit::dpi::PhysicalSize;
 use winit::event::{MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 #[cfg(target_family = "wasm")]
@@ -26,12 +30,18 @@ use winit::platform::windows::EventLoopBuilderExtWindows;
 #[cfg(target_os = "linux")]
 use winit::platform::x11::EventLoopBuilderExtX11;
 
-use crate::sdf::Complex;
+use crate::sdf::{Circle, Complex};
 
 pub mod sdf;
 
 pub const fn triangle_count(n: i32) -> i32 {
     (n * (1 + n)) / 2
+}
+
+impl<U> From<euclid::Point2D<f32, U>> for Complex {
+    fn from(value: euclid::Point2D<f32, U>) -> Self {
+        Self::new(value.x, value.y)
+    }
 }
 
 #[derive(Debug)]
@@ -275,18 +285,16 @@ impl Driver {
                             },
                             count: None,
                         },
-                        /*BindGroupLayoutEntry {
+                        BindGroupLayoutEntry {
                             binding: 2,
-                            visibility: wgpu::ShaderStages::VERTEX,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
                             ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
                                 has_dynamic_offset: false,
-                                min_binding_size: std::num::NonZero::<u64>::new(
-                                    size_of::<[f32; 4]>() as u64,
-                                ),
+                                min_binding_size: None,
                             },
                             count: None,
-                        },*/
+                        },
                     ],
                 });
 
@@ -349,6 +357,7 @@ struct AppState {
     points: wgpu::Buffer,
     atomic_offset: wgpu::Buffer,
     shape_idx: wgpu::Buffer,
+    quadtree: wgpu::Buffer,
 }
 
 const BACKCOLOR: wgpu::Color = wgpu::Color {
@@ -502,25 +511,25 @@ impl AppState {
 
 #[derive(Clone, Debug)]
 pub enum Shape {
-    Circle(sdf::Circle, u8),
-    HalfPlane(sdf::HalfPlane, u8),
-    Bezier(sdf::Bezier2o2d, u8),
-    Composite(Box<CompositeField>),
+    Circle(sdf::Circle, u8, usize),
+    HalfPlane(sdf::HalfPlane, u8, usize),
+    Bezier(sdf::Bezier2o2d, u8, usize),
+    Composite(Box<CompositeField>, usize),
 }
 
 impl From<sdf::Circle> for Shape {
     fn from(value: sdf::Circle) -> Self {
-        Shape::Circle(value, 0)
+        Shape::Circle(value, 0, 0)
     }
 }
 impl From<sdf::HalfPlane> for Shape {
     fn from(value: sdf::HalfPlane) -> Self {
-        Shape::HalfPlane(value, 0)
+        Shape::HalfPlane(value, 0, 0)
     }
 }
 impl From<sdf::Bezier2o2d> for Shape {
     fn from(value: sdf::Bezier2o2d) -> Self {
-        Shape::Bezier(value, 0)
+        Shape::Bezier(value, 0, 0)
     }
 }
 
@@ -540,10 +549,12 @@ impl<'a> Iterator for ShapeIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(item) = self.0.pop() {
             match item {
-                x @ Shape::Circle(_, _) | x @ Shape::HalfPlane(_, _) | x @ Shape::Bezier(_, _) => {
+                x @ Shape::Circle(_, _, _)
+                | x @ Shape::HalfPlane(_, _, _)
+                | x @ Shape::Bezier(_, _, _) => {
                     return Some(x);
                 }
-                Shape::Composite(f) => {
+                Shape::Composite(f, _) => {
                     self.0.push(&f.r);
                     self.0.push(&f.l);
                 }
@@ -587,11 +598,14 @@ impl<T: Into<Self>> std::ops::BitOr<T> for Shape {
     type Output = Shape;
 
     fn bitor(self, rhs: T) -> Self::Output {
-        Shape::Composite(Box::new(CompositeField {
-            l: self,
-            op: ShapeOp::OpUnion as u8,
-            r: rhs.into(),
-        }))
+        Shape::Composite(
+            Box::new(CompositeField {
+                l: self,
+                op: ShapeOp::OpUnion as u8,
+                r: rhs.into(),
+            }),
+            0,
+        )
     }
 }
 
@@ -599,11 +613,14 @@ impl<T: Into<Self>> std::ops::BitAnd<T> for Shape {
     type Output = Shape;
 
     fn bitand(self, rhs: T) -> Self::Output {
-        Shape::Composite(Box::new(CompositeField {
-            l: self,
-            op: ShapeOp::OpIntersect as u8,
-            r: rhs.into(),
-        }))
+        Shape::Composite(
+            Box::new(CompositeField {
+                l: self,
+                op: ShapeOp::OpIntersect as u8,
+                r: rhs.into(),
+            }),
+            0,
+        )
     }
 }
 
@@ -612,12 +629,12 @@ impl std::ops::Neg for Shape {
 
     fn neg(self) -> Self::Output {
         match self {
-            Self::Circle(c, f) => Self::Circle(c, f ^ ShapeOp::OpNegate as u8),
-            Self::HalfPlane(hp, f) => Self::HalfPlane(hp, f ^ ShapeOp::OpNegate as u8),
-            Self::Bezier(b, f) => Self::Bezier(b, f ^ ShapeOp::OpNegate as u8),
-            Self::Composite(mut f) => {
+            Self::Circle(c, f, idx) => Self::Circle(c, f ^ ShapeOp::OpNegate as u8, idx),
+            Self::HalfPlane(hp, f, idx) => Self::HalfPlane(hp, f ^ ShapeOp::OpNegate as u8, idx),
+            Self::Bezier(b, f, idx) => Self::Bezier(b, f ^ ShapeOp::OpNegate as u8, idx),
+            Self::Composite(mut f, idx) => {
                 f.op ^= ShapeOp::OpNegate as u8;
-                Self::Composite(f)
+                Self::Composite(f, idx)
             }
         }
     }
@@ -630,12 +647,12 @@ impl Shape {
 
     pub fn abs(self) -> Self {
         match self {
-            Self::Circle(c, f) => Self::Circle(c, f | ShapeOp::OpHollow as u8),
-            Self::HalfPlane(hp, f) => Self::HalfPlane(hp, f | ShapeOp::OpHollow as u8),
-            Self::Bezier(b, f) => Self::Bezier(b, f | ShapeOp::OpHollow as u8),
-            Self::Composite(mut f) => {
+            Self::Circle(c, f, idx) => Self::Circle(c, f | ShapeOp::OpHollow as u8, idx),
+            Self::HalfPlane(hp, f, idx) => Self::HalfPlane(hp, f | ShapeOp::OpHollow as u8, idx),
+            Self::Bezier(b, f, idx) => Self::Bezier(b, f | ShapeOp::OpHollow as u8, idx),
+            Self::Composite(mut f, idx) => {
                 f.op |= ShapeOp::OpHollow as u8;
-                Self::Composite(f)
+                Self::Composite(f, idx)
             }
         }
     }
@@ -646,6 +663,7 @@ impl Shape {
                 radius,
             },
             0,
+            0,
         )
     }
     pub fn halfplane(normal: (f32, f32), shift: f32) -> Self {
@@ -655,37 +673,42 @@ impl Shape {
                 shift,
             },
             0,
+            0,
         )
     }
     pub fn bezier(control: [(f32, f32); 3]) -> Self {
         Self::Bezier(
             sdf::Bezier2o2d(control[0].into(), control[1].into(), control[2].into()),
             0,
+            0,
         )
     }
-    fn recurse_array(&self, v: &mut Vec<f32>) {
+    fn recurse_array(&mut self, v: &mut Vec<f32>) {
         use sdf::AsArrayRef;
 
         match self {
-            Self::Circle(c, f) => {
-                v.push(bytemuck::cast((ShapeOp::Circle as u8 | f) as u32));
+            Self::Circle(c, f, idx) => {
+                *idx = v.len();
+                v.push(bytemuck::cast((ShapeOp::Circle as u8 | *f) as u32));
                 v.extend_from_slice(c.as_array());
             }
-            Self::HalfPlane(hp, f) => {
-                v.push(bytemuck::cast((ShapeOp::HalfPlane as u8 | f) as u32));
+            Self::HalfPlane(hp, f, idx) => {
+                *idx = v.len();
+                v.push(bytemuck::cast((ShapeOp::HalfPlane as u8 | *f) as u32));
                 v.extend_from_slice(hp.as_array())
             }
-            Self::Bezier(b, f) => {
-                v.push(bytemuck::cast((ShapeOp::Bezier as u8 | f) as u32));
+            Self::Bezier(b, f, idx) => {
+                *idx = v.len();
+                v.push(bytemuck::cast((ShapeOp::Bezier as u8 | *f) as u32));
                 v.extend_from_slice(b.as_array())
             }
-            Self::Composite(f) => {
-                f.recurse_array(v);
+            Self::Composite(f, idx) => {
+                *idx = f.recurse_array(v);
             }
         }
     }
     /// Converts an expression tree to reverse polish notation using postfix traversal
-    pub fn to_array(&self) -> Vec<f32> {
+    pub fn to_array(&mut self) -> Vec<f32> {
         let mut v = Vec::new();
         self.recurse_array(&mut v);
         v
@@ -704,12 +727,12 @@ impl Shape {
 
     pub fn eval(&self, pos: Complex) -> f32 {
         match self {
-            Self::Circle(circle, f) => Self::unary_op(*f, sdf::sdf_disk(*circle)(pos)),
-            Self::HalfPlane(half_plane, f) => {
+            Self::Circle(circle, f, _) => Self::unary_op(*f, sdf::sdf_disk(*circle)(pos)),
+            Self::HalfPlane(half_plane, f, _) => {
                 Self::unary_op(*f, sdf::sdf_halfPlane(*half_plane)(pos))
             }
-            Self::Bezier(b, f) => Self::unary_op(*f, b.sdf()(pos)),
-            Self::Composite(f) => {
+            Self::Bezier(b, f, _) => Self::unary_op(*f, b.sdf()(pos)),
+            Self::Composite(f, _) => {
                 let l = f.l.eval(pos);
                 let r = f.r.eval(pos);
                 Self::unary_op(
@@ -723,13 +746,147 @@ impl Shape {
             }
         }
     }
+
+    pub fn nbp(&self, root: &Shape, pos: Complex, target: &mut Complex) {
+        match self {
+            Self::Circle(circle, _, _) => {
+                let p = sdf::diskNBP(*circle)(pos);
+                if (p - pos).squaredMag() < (*target - pos).squaredMag()
+                    && is_boundary_point(root, p)
+                {
+                    *target = p;
+                }
+            }
+            Self::HalfPlane(half_plane, _, _) => {
+                let p = sdf::halfPlaneNBP(*half_plane)(pos);
+                if (p - pos).squaredMag() < (*target - pos).squaredMag()
+                    && is_boundary_point(root, p)
+                {
+                    *target = p;
+                }
+            }
+            Self::Bezier(b, _, _) => {
+                for p in b.findLocallyNearestPoints(pos) {
+                    if (p - pos).squaredMag() < (*target - pos).squaredMag()
+                        && is_boundary_point(root, p)
+                    {
+                        *target = p;
+                    }
+                }
+            }
+            Self::Composite(f, _) => {
+                f.l.nbp(root, pos, target);
+                f.r.nbp(root, pos, target);
+            }
+        }
+    }
+
+    pub fn trim_shape(
+        &self,
+        centroid: sdf::Complex,
+        nearest: sdf::Complex,
+        diagonal: f32,
+        points: &[(sdf::Complex, (usize, usize))],
+    ) -> Option<Self> {
+        let mut marked: HashSet<usize> = HashSet::new();
+        let r2 = diagonal * diagonal;
+
+        for (pos, (l, r)) in points {
+            let dist_sq = (*pos - nearest).squaredMag();
+            if dist_sq <= r2 {
+                marked.insert(*l);
+                marked.insert(*r);
+            }
+        }
+
+        let r = diagonal + (centroid - nearest).mag();
+
+        self.candidate_points(self, centroid, r * r, &mut marked);
+
+        // Now we have marked all SDFs that participate in this region, so we go through our Shape and delete parts with unused SDFs
+        self.clone().trim_marked(&marked)
+    }
+
+    fn trim_marked(self, marked: &HashSet<usize>) -> Option<Self> {
+        match self {
+            x @ Self::Circle(_, _, idx)
+            | x @ Self::HalfPlane(_, _, idx)
+            | x @ Self::Bezier(_, _, idx) => marked.contains(&idx).then(move || x),
+            Self::Composite(mut f, flag) => {
+                let l = f.l.trim_marked(marked);
+                let r = f.r.trim_marked(marked);
+
+                if l.is_some() && r.is_some() {
+                    // Put everything back into the composite and return it
+                    f.l = l.unwrap();
+                    f.r = r.unwrap();
+                    Some(Self::Composite(f, flag))
+                } else {
+                    // Return only the valid half, if any exists, or return None
+                    l.or(r)
+                }
+            }
+        }
+    }
+
+    fn candidate_points(
+        &self,
+        root: &Self,
+        centroid: sdf::Complex,
+        r2: f32,
+        marked: &mut HashSet<usize>,
+    ) {
+        match self {
+            Self::Circle(c, _, idx) if !marked.contains(idx) => {
+                let pos = sdf::diskNBP(*c)(centroid);
+                if (pos - centroid).squaredMag() < r2 && is_boundary_point(root, pos) {
+                    marked.insert(*idx);
+                }
+            }
+            Self::HalfPlane(hp, _, idx) if !marked.contains(idx) => {
+                let pos = sdf::halfPlaneNBP(*hp)(centroid);
+                if (pos - centroid).squaredMag() < r2 && is_boundary_point(root, pos) {
+                    marked.insert(*idx);
+                }
+            }
+            Self::Bezier(b, _, idx) if !marked.contains(idx) => {
+                for pos in b.findLocallyNearestPoints(centroid) {
+                    if (pos - centroid).squaredMag() < r2 && is_boundary_point(root, pos) {
+                        marked.insert(*idx);
+                    }
+                }
+            }
+            Self::Composite(f, _) => {
+                f.l.candidate_points(root, centroid, r2, marked);
+                f.r.candidate_points(root, centroid, r2, marked);
+            }
+            _ => (),
+        }
+    }
+
+    fn to_indirect_array(&self, out: &mut Vec<u32>) -> u32 {
+        match self {
+            Self::Circle(_, _, idx) | Self::HalfPlane(_, _, idx) | Self::Bezier(_, _, idx) => {
+                out.push(*idx as u32);
+                return 1;
+            }
+            Self::Composite(f, idx) => {
+                let l = f.l.to_indirect_array(out);
+                let r = f.r.to_indirect_array(out);
+                out.push(*idx as u32);
+                l + r + 1
+            }
+        }
+    }
 }
 
 impl CompositeField {
-    fn recurse_array(&self, v: &mut Vec<f32>) {
+    fn recurse_array(&mut self, v: &mut Vec<f32>) -> usize {
         self.l.recurse_array(v);
         self.r.recurse_array(v);
+        let idx = v.len();
         v.push(bytemuck::cast(self.op as u32));
+        idx
     }
 }
 
@@ -778,7 +935,8 @@ pub fn get_indices(shapes: &[f32]) -> (Vec<u32>, u32) {
 struct App {
     state: Option<AppState>,
     composite: Shape,
-    points: Vec<Complex>,
+    flatten: Vec<f32>,
+    points: Vec<(Complex, (usize, usize))>,
     offset: [f32; 2],
     lastpos: PhysicalPosition<f64>,
     mousedown: bool,
@@ -795,6 +953,7 @@ impl ApplicationHandler for App {
         #[cfg(not(target_family = "wasm"))]
         let window_attributes = WindowAttributes::default()
             .with_title(env!("CARGO_CRATE_NAME"))
+            .with_inner_size(PhysicalSize::new(600, 600))
             .with_resizable(true);
         #[cfg(target_family = "wasm")]
         let window_attributes = WindowAttributes::default()
@@ -845,14 +1004,13 @@ impl ApplicationHandler for App {
         surface.configure(&driver.device, &config);
 
         use zerocopy::IntoBytes;
-        let flatten = self.composite.to_array();
         let shapes = driver.device.create_buffer_init(&BufferInitDescriptor {
             label: Some("Shapes"),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            contents: flatten.as_bytes(),
+            contents: self.flatten.as_bytes(),
         });
 
-        let (shape_indexes, max_points) = get_indices(&flatten);
+        let (shape_indexes, max_points) = get_indices(&self.flatten);
         let blank_points: Vec<f32> = Vec::from_iter((0..(max_points * 2)).map(|_| f32::MAX));
 
         let points = driver.device.create_buffer_init(&BufferInitDescriptor {
@@ -865,6 +1023,27 @@ impl ApplicationHandler for App {
             label: Some("Atomic total offset"),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             contents: [0u32].as_bytes(),
+        });
+
+        use euclid::default::Box2D;
+        use euclid::default::Point2D;
+        use euclid::default::Size2D;
+
+        let mut quad_v: Vec<u32> = Vec::new();
+        build_quadtree(
+            Box2D::from_origin_and_size(
+                Point2D::new(config.width as f32 * -0.5, config.height as f32 * -0.5),
+                Size2D::new(config.width as f32, config.height as f32),
+            ),
+            &mut quad_v,
+            &self.composite,
+            &self.points,
+        );
+        quad_v.resize(1 << 17, 0);
+        let quadtree = driver.device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("Quadtree"),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            contents: quad_v.as_bytes(),
         });
 
         /*let shapes = driver.device.create_buffer(&BufferDescriptor {
@@ -890,10 +1069,10 @@ impl ApplicationHandler for App {
                 binding: 1,
                 resource: points.as_entire_binding(),
             },
-            /*BindGroupEntry {
+            BindGroupEntry {
                 binding: 2,
-                resource: extent.as_entire_binding(),
-            },*/
+                resource: quadtree.as_entire_binding(),
+            },
         ];
 
         let (pipeline, bind_group_layout) = driver.get_draw_pipeline(config.view_formats[0]);
@@ -955,6 +1134,7 @@ impl ApplicationHandler for App {
             compute_group,
             shape_idx,
             atomic_offset,
+            quadtree,
         });
     }
 
@@ -970,6 +1150,29 @@ impl ApplicationHandler for App {
                 config.width = size.width;
                 config.height = size.height;
                 state.surface.configure(&state.driver.device, config);
+
+                {
+                    use euclid::default::Box2D;
+                    use euclid::default::Point2D;
+                    use euclid::default::Size2D;
+                    use zerocopy::IntoBytes;
+
+                    let mut quad_v: Vec<u32> = Vec::new();
+                    build_quadtree(
+                        Box2D::from_origin_and_size(
+                            Point2D::new(config.width as f32 * -0.5, config.height as f32 * -0.5),
+                            Size2D::new(config.width as f32, config.height as f32),
+                        ),
+                        &mut quad_v,
+                        &self.composite,
+                        &self.points,
+                    );
+
+                    state
+                        .driver
+                        .queue
+                        .write_buffer(&state.quadtree, 0, quad_v.as_bytes());
+                }
                 state.window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
@@ -1072,7 +1275,7 @@ fn new_app<T>(any_thread: bool) -> eyre::Result<EventLoop<T>> {
 
 impl From<&Shape> for sdf::HalfPlane {
     fn from(val: &Shape) -> Self {
-        if let Shape::HalfPlane(hp, _) = val {
+        if let Shape::HalfPlane(hp, _, _) = val {
             *hp
         } else {
             panic!("invalid cast");
@@ -1082,7 +1285,7 @@ impl From<&Shape> for sdf::HalfPlane {
 
 impl From<&Shape> for sdf::Circle {
     fn from(val: &Shape) -> Self {
-        if let Shape::Circle(c, _) = val {
+        if let Shape::Circle(c, _, _) = val {
             *c
         } else {
             panic!("invalid cast");
@@ -1092,12 +1295,69 @@ impl From<&Shape> for sdf::Circle {
 
 impl From<&Shape> for sdf::Bezier2o2d {
     fn from(val: &Shape) -> Self {
-        if let Shape::Bezier(b, _) = val {
+        if let Shape::Bezier(b, _, _) = val {
             *b
         } else {
             panic!("invalid cast");
         }
     }
+}
+
+enum PointIter {
+    Zero,
+    One(core::array::IntoIter<Complex, 1>, (usize, usize)),
+    Two(core::array::IntoIter<Complex, 2>, (usize, usize)),
+    Four(core::array::IntoIter<Complex, 4>, (usize, usize)),
+}
+
+impl Iterator for PointIter {
+    type Item = (Complex, (usize, usize));
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            PointIter::Zero => None,
+            PointIter::One(i, pair) => i.next().map(|x| (x, *pair)),
+            PointIter::Two(i, pair) => i.next().map(|x| (x, *pair)),
+            PointIter::Four(i, pair) => i.next().map(|x| (x, *pair)),
+        }
+    }
+}
+
+pub fn implied_points<'a>(
+    shapes: impl Iterator<Item = &'a Shape> + Clone,
+) -> impl Iterator<Item = (Complex, (usize, usize))> {
+    use itertools::Itertools;
+    shapes
+        .clone()
+        .tuple_combinations()
+        .map(|(l, r)| match (l, r) {
+            (Shape::Circle(c1, _, i), Shape::Circle(c2, _, j)) => {
+                PointIter::Two(sdf::twoCirclesIntersect(*c1, *c2).into_iter(), (*i, *j))
+            }
+            (Shape::HalfPlane(hp, _, i), Shape::Circle(c, _, j))
+            | (Shape::Circle(c, _, i), Shape::HalfPlane(hp, _, j)) => {
+                PointIter::Two(sdf::circleLineIntersect(*c, *hp).into_iter(), (*i, *j))
+            }
+            (Shape::HalfPlane(hp1, _, i), Shape::HalfPlane(hp2, _, j)) => {
+                PointIter::One([sdf::twoLinesIntersect(*hp1, *hp2)].into_iter(), (*i, *j))
+            }
+            (Shape::Bezier(b, _, i), Shape::Circle(c, _, j))
+            | (Shape::Circle(c, _, i), Shape::Bezier(b, _, j)) => {
+                PointIter::Four(b.bezier2o2dCircleIntersect(*c).into_iter(), (*i, *j))
+            }
+            (Shape::Bezier(b, _, i), Shape::HalfPlane(hp, _, j))
+            | (Shape::HalfPlane(hp, _, i), Shape::Bezier(b, _, j)) => {
+                PointIter::Two(b.bezier2o2dLineIntersect(*hp).into_iter(), (*i, *j))
+            }
+            (Shape::Bezier(b1, _, i), Shape::Bezier(b2, _, j)) => {
+                PointIter::Four(b1.twoBezier2o2dsIntersect(*b2).into_iter(), (*i, *j))
+            }
+            _ => panic!("Composite in shape iter!"),
+        })
+        .chain(shapes.map(|x| match x {
+            Shape::Bezier(b, _, i) => PointIter::Two([b.0, b.2].into_iter(), (*i, *i)),
+            _ => PointIter::Zero,
+        }))
+        .flatten()
 }
 
 // Count all possible points from the types of intersections
@@ -1112,6 +1372,79 @@ const fn max_points(beziers: u32, circles: u32, lines: u32) -> u32 {
     triangle_count(beziers as i32 - 1) as u32 * 4 // bezier-bezier intersection
 }
 
+struct QuadTree {
+    children: Option<Box<QuadTree>>,
+    indirect: Vec<usize>,
+}
+
+fn is_large_shape(s: &Shape) -> bool {
+    // Currently, we consider anything larger than 2 shapes to be a "large" shape
+    match s {
+        Shape::Composite(f, _) => {
+            return matches!(f.l, Shape::Composite(_, _)) || matches!(f.r, Shape::Composite(_, _));
+        }
+        _ => false,
+    }
+}
+
+pub const QUAD_CHILD: u32 = 1 << 31;
+
+pub fn build_quadtree(
+    area: euclid::default::Box2D<f32>,
+    v: &mut Vec<u32>,
+    sdf: &Shape,
+    points: &[(sdf::Complex, (usize, usize))],
+) -> u32 {
+    use euclid::default::Box2D;
+    use euclid::default::Point2D;
+
+    let centroid = area.center();
+    let mut nearest = Complex::new(f32::MAX, f32::MAX);
+    sdf.nbp(&sdf, centroid.into(), &mut nearest);
+
+    let trimmed = sdf.trim_shape(
+        sdf::Complex::new(centroid.x, centroid.y),
+        nearest,
+        Complex::new(area.width(), area.height()).mag(),
+        points,
+    );
+
+    let idx = v.len() as u32;
+
+    if let Some(s) = &trimmed
+        && ((area.height() > 2.0 && area.width() > 2.0 && is_large_shape(s)) || v.is_empty())
+    {
+        let quad = area.size() * 0.5;
+        let topleft = area.min;
+
+        let q = [
+            Box2D::from_origin_and_size(topleft, quad),
+            Box2D::from_origin_and_size(Point2D::new(topleft.x + quad.width, topleft.y), quad),
+            Box2D::from_origin_and_size(Point2D::new(topleft.x, topleft.y + quad.height), quad),
+            Box2D::from_origin_and_size(
+                Point2D::new(topleft.x + quad.width, topleft.y + quad.height),
+                quad,
+            ),
+        ];
+
+        v.extend_from_slice(&[0, 0, 0, 0]);
+
+        let mut i = idx as usize;
+        for quadrant in q {
+            v[i] = build_quadtree(quadrant, v, &s, points);
+            i += 1;
+        }
+
+        idx
+    } else {
+        let s = trimmed.as_ref().unwrap_or(sdf);
+        v.push(0);
+        let count = s.to_indirect_array(v);
+        v[idx as usize] = count;
+        idx | QUAD_CHILD
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_family = "wasm")]
     console_error_panic_hook::set_once();
@@ -1120,29 +1453,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hp2 = Shape::halfplane((0.0, 1.0), -120.0);
     let c1 = Shape::circle((-180.0, 0.0), 240.0);
     let c2 = Shape::circle((180.0, 0.0), 240.0);
+    let c3 = Shape::circle((0.0, -180.0), 240.0);
     let b1 = Shape::bezier([(0.0, 320.0), (0.0, -640.0), (120.0, 320.0)]);
     let b2 = Shape::bezier([(320.0, 0.0), (-640.0, 0.0), (320.0, 120.0)]);
 
     //u (i (n (u (n (hp exampleHalfPlanes[0])) (hp exampleHalfPlanes[1]))) (i (n (disk exampleDisks[0])) (disk exampleDisks[1]))) (bez exampleBezier2o2ds[0])
-    let composite = ((-((-hp1) | hp2)) & ((-c1) & c2)) | (b1 | b2);
+    let mut composite = ((-((-hp1) | hp2)) & ((-c1) & c2)) | (b1 | b2);
 
-    //let composite = b1 | b2;
-    let composite2 = composite.clone();
-    let psdf = move |pos: Complex| composite2.eval(pos);
-
-    let shapes = Vec::from_iter(composite.iter());
-    println!("shapes: {shapes:?}");
-
-    let mut points = Vec::from_iter(
-        implied_points(composite.iter()).filter(|x| sdf::isBoundaryPoint(&psdf, *x)),
+    //let mut composite = ((-c1) & c2) | c3;
+    //let shapes = Vec::from_iter(composite.iter());
+    //println!("shapes: {shapes:?}");
+    let flatten = composite.to_array();
+    let points = Vec::from_iter(
+        implied_points(composite.iter()).filter(|(x, _)| is_boundary_point(&composite, *x)),
     );
 
-    if points.is_empty() {
-        points.push(Complex::new(f32::MAX, f32::MAX));
-    }
     let event_loop = new_app(true)?;
     let mut app = App {
         state: None,
+        flatten,
         composite,
         points,
         lastpos: PhysicalPosition { x: 0.0, y: 0.0 },
@@ -1157,59 +1486,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-enum PointIter {
-    Zero,
-    One(core::array::IntoIter<Complex, 1>),
-    Two(core::array::IntoIter<Complex, 2>),
-    Four(core::array::IntoIter<Complex, 4>),
-}
-
-impl Iterator for PointIter {
-    type Item = Complex;
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            PointIter::Zero => None,
-            PointIter::One(i) => i.next(),
-            PointIter::Two(i) => i.next(),
-            PointIter::Four(i) => i.next(),
-        }
-    }
-}
-
-pub fn implied_points<'a>(
-    shapes: impl Iterator<Item = &'a Shape> + Clone,
-) -> impl Iterator<Item = Complex> {
-    use itertools::Itertools;
-    shapes
-        .clone()
-        .tuple_combinations()
-        .map(|(l, r)| match (l, r) {
-            (Shape::Circle(c1, _), Shape::Circle(c2, _)) => {
-                PointIter::Two(sdf::twoCirclesIntersect(*c1, *c2).into_iter())
-            }
-            (Shape::HalfPlane(hp, _), Shape::Circle(c, _))
-            | (Shape::Circle(c, _), Shape::HalfPlane(hp, _)) => {
-                PointIter::Two(sdf::circleLineIntersect(*c, *hp).into_iter())
-            }
-            (Shape::HalfPlane(hp1, _), Shape::HalfPlane(hp2, _)) => {
-                PointIter::One([sdf::twoLinesIntersect(*hp1, *hp2)].into_iter())
-            }
-            (Shape::Bezier(b, _), Shape::Circle(c, _))
-            | (Shape::Circle(c, _), Shape::Bezier(b, _)) => {
-                PointIter::Four(b.bezier2o2dCircleIntersect(*c).into_iter())
-            }
-            (Shape::Bezier(b, _), Shape::HalfPlane(hp, _))
-            | (Shape::HalfPlane(hp, _), Shape::Bezier(b, _)) => {
-                PointIter::Two(b.bezier2o2dLineIntersect(*hp).into_iter())
-            }
-            (Shape::Bezier(b1, _), Shape::Bezier(b2, _)) => {
-                PointIter::Four(b1.twoBezier2o2dsIntersect(*b2).into_iter())
-            }
-            _ => panic!("Composite in shape iter!"),
-        })
-        .chain(shapes.map(|x| match x {
-            Shape::Bezier(b, _) => PointIter::Two([b.0, b.2].into_iter()),
-            _ => PointIter::Zero,
-        }))
-        .flatten()
+pub fn is_boundary_point(f: &Shape, pos: Complex) -> bool {
+    f.eval(pos).abs() <= sdf::BOUNDARY_THRESHOLD
 }
