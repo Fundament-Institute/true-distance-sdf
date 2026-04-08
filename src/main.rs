@@ -30,7 +30,7 @@ use crate::sdf::Complex;
 
 pub mod sdf;
 
-pub const fn triangle_count(n: u32) -> u32 {
+pub const fn triangle_count(n: i32) -> i32 {
     (n * (1 + n)) / 2
 }
 
@@ -411,7 +411,8 @@ impl AppState {
             pass.set_pipeline(&self.compute_pipeline);
             pass.set_bind_group(0, &self.compute_group, &[]);
             pass.dispatch_workgroups(
-                (triangle_count((self.shape_idx.size() / size_of::<f32>() as u64) as u32) / 128)
+                (triangle_count((self.shape_idx.size() / size_of::<f32>() as u64) as i32) / 128)
+                    as u32
                     + 1,
                 1,
                 1,
@@ -1103,12 +1104,12 @@ impl From<&Shape> for sdf::Bezier2o2d {
 #[allow(clippy::identity_op)]
 const fn max_points(beziers: u32, circles: u32, lines: u32) -> u32 {
     beziers * 2 + // unconditional points
-    triangle_count(lines - 1) * 1 + // line-line intersection
-    triangle_count(circles - 1) * 2 + // circle-circle intersection
-    triangle_count(lines + circles - 1) * 2 + // line-circle intersection
-    triangle_count(beziers + lines - 1) * 2 + // bezier-line intersection
-    triangle_count(beziers + circles - 1) * 4 + // bezier-circle intersection
-    triangle_count(beziers - 1) * 4 // bezier-bezier intersection
+    triangle_count(lines as i32 - 1) as u32 * 1 + // line-line intersection
+    triangle_count(circles as i32 - 1) as u32 * 2 + // circle-circle intersection
+    triangle_count((lines + circles) as i32 - 1) as u32 * 2 + // line-circle intersection
+    triangle_count((beziers + lines) as i32 - 1) as u32 * 2 + // bezier-line intersection
+    triangle_count((beziers + circles) as i32 - 1) as u32 * 4 + // bezier-circle intersection
+    triangle_count(beziers as i32 - 1) as u32 * 4 // bezier-bezier intersection
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -1125,7 +1126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //u (i (n (u (n (hp exampleHalfPlanes[0])) (hp exampleHalfPlanes[1]))) (i (n (disk exampleDisks[0])) (disk exampleDisks[1]))) (bez exampleBezier2o2ds[0])
     let composite = ((-((-hp1) | hp2)) & ((-c1) & c2)) | (b1 | b2);
 
-    //let composite = b1;
+    //let composite = b1 | b2;
     let composite2 = composite.clone();
     let psdf = move |pos: Complex| composite2.eval(pos);
 
