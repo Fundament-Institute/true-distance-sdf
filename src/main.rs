@@ -1,11 +1,13 @@
 #![allow(dead_code)]
 
 use core::f32;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::num::NonZero;
 use std::sync::Arc;
 use std::thread::Thread;
 
+use euclid::default::Vector2D;
 use rand::rngs::Xoshiro128PlusPlus;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use winit::application::ApplicationHandler;
@@ -78,7 +80,7 @@ impl Driver {
         }
 
         let required_limits = wgpu::Limits {
-            max_immediate_size: size_of::<[f32; 4]>() as u32,
+            max_immediate_size: size_of::<[f32; 6]>() as u32,
             ..Default::default()
         };
 
@@ -305,7 +307,7 @@ impl Driver {
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Draw Pipeline"),
                 bind_group_layouts: &[Some(&bind_group_layout)],
-                immediate_size: size_of::<[f32; 4]>() as u32,
+                immediate_size: size_of::<[f32; 6]>() as u32,
             });
 
         let pipeline = self
@@ -387,6 +389,7 @@ impl AppState {
         &mut self,
         mut encoder: wgpu::CommandEncoder,
         offset: [f32; 2],
+        mousepos: [f32; 2],
     ) -> eyre::Result<()> {
         let frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(t) | CurrentSurfaceTexture::Suboptimal(t) => Ok(t),
@@ -478,6 +481,8 @@ impl AppState {
                     self.config.height as f32,
                     offset[0],
                     offset[1],
+                    mousepos[0],
+                    mousepos[1],
                 ]
                 .as_bytes(),
             );
@@ -652,6 +657,30 @@ impl Shape {
         ShapeIter::new(self)
     }
 
+    pub fn demorgan(self, mut flip: bool) -> Self {
+        match self {
+            Self::Composite(mut f, idx) => {
+                flip ^= (f.op & ShapeOp::OpNegate as u8) != 0;
+                if flip {
+                    f.op = if (f.op & OP_MASK) == ShapeOp::OpUnion as u8 {
+                        ShapeOp::OpIntersect as u8
+                    } else {
+                        ShapeOp::OpUnion as u8
+                    };
+                }
+                f.l = f.l.demorgan(flip);
+                f.r = f.r.demorgan(flip);
+                Self::Composite(f, idx)
+            }
+            x => {
+                if flip {
+                    -x
+                } else {
+                    x
+                }
+            }
+        }
+    }
     pub fn abs(self) -> Self {
         match self {
             Self::Circle(c, f, idx) => Self::Circle(c, f | ShapeOp::OpHollow as u8, idx),
@@ -709,6 +738,7 @@ impl Shape {
                 v.extend_from_slice(b.as_array())
             }
             Self::Constant(val, idx) => {
+                panic!("shouldn't happen");
                 *idx = v.len();
                 v.push(bytemuck::cast((ShapeOp::Constant as u8) as u32));
                 v.push(*val);
@@ -734,6 +764,15 @@ impl Shape {
             x = x.abs();
         }
         x
+    }
+
+    fn drop_unary(self) -> Self {
+        match self {
+            Self::Circle(c, f, idx) => Self::Circle(c, 0, idx),
+            Self::HalfPlane(hp, f, idx) => Self::HalfPlane(hp, 0, idx),
+            Self::Bezier(b, f, idx) => Self::Bezier(b, 0, idx),
+            x => x,
+        }
     }
 
     pub fn eval(&self, pos: Complex) -> f32 {
@@ -835,6 +874,17 @@ impl Shape {
         self.clone().trim_marked(&marked, centroid)
     }
 
+    fn constant_fold(vl: f32, vr: f32, op: u8) -> f32 {
+        Self::unary_op(
+            op,
+            if op & OP_MASK == ShapeOp::OpUnion as u8 {
+                vl.min(vr)
+            } else {
+                vl.max(vr)
+            },
+        )
+    }
+
     fn trim_marked(self, marked: &HashSet<usize>, centroid: Complex) -> Self {
         match self {
             x @ Self::Circle(_, _, idx)
@@ -844,6 +894,7 @@ impl Shape {
                     x
                 } else {
                     Self::Constant(x.eval(centroid), idx)
+                    //Self::Constant(x.eval(centroid), idx)
                 }
             }
             x @ Self::Constant(_, _) => x,
@@ -851,27 +902,78 @@ impl Shape {
                 let l = f.l.trim_marked(marked, centroid);
                 let r = f.r.trim_marked(marked, centroid);
 
-                if let Shape::Constant(vl, _) = &l
+                /*match (l, r, f.op & OP_MASK) {
+                    (Shape::Constant(vl, _), Shape::Constant(vr, _), _) => Shape::Constant(
+                        Self::constant_fold(vl, vr, f.op),
+                        usize::MAX,
+                    ),
+                    (Shape::Constant(_, _), x, o) | (x, Shape::Constant(_, _), o) => {
+                        if o == ShapeOp::OpUnion as u8 {
+                            f.l = x;
+                            f.r = Shape::Constant(f32::MAX, usize::MAX);
+                        } else if o == ShapeOp::OpIntersect as u8 {
+                            f.l = Shape::Constant(f32::MIN, usize::MAX);
+                            f.r = x;
+                        } else {
+                            panic!("invalid op");
+                        }
+                        Self::Composite(f, flag)
+                    }
+                    (l, r, _) => {
+                        f.l = l;
+                        f.r = r;
+                        Self::Composite(f, flag)
+                    }
+                }*/
+                match (l, r) {
+                    (Shape::Constant(vl, _), Shape::Constant(vr, _)) => {
+                        Shape::Constant(Self::constant_fold(vl, vr, f.op), usize::MAX)
+                    }
+                    (Shape::Constant(vl, _), Shape::Composite(b, _))
+                    | (Shape::Composite(b, _), Shape::Constant(vl, _))
+                        if (matches!(b.l, Shape::Constant(_, _))
+                            || matches!(b.r, Shape::Constant(_, _)))
+                            && b.op == f.op =>
+                    {
+                        match (b.l, b.r) {
+                            (Shape::Constant(vr, _), x) | (x, Shape::Constant(vr, _)) => {
+                                f.l = x;
+                                f.r =
+                                    Shape::Constant(Self::constant_fold(vl, vr, f.op), usize::MAX);
+                                /*f.r = Shape::Constant(
+                                    if (f.op & OP_MASK) == ShapeOp::OpUnion as u8 {
+                                        f32::MAX
+                                    } else {
+                                        f32::MIN
+                                    },
+                                    usize::MAX,
+                                );*/
+                                Self::Composite(f, flag)
+                            }
+                            _ => panic!("invalid match"),
+                        }
+                    }
+                    (l, r) => {
+                        f.l = l;
+                        f.r = r;
+                        Self::Composite(f, flag)
+                    }
+                }
+                /*if let Shape::Constant(vl, _) = &l
                     && let Shape::Constant(vr, _) = &r
                 {
                     // Do constant folding
-                    Shape::Constant(
-                        Self::unary_op(
-                            f.op,
-                            if f.op & OP_MASK == ShapeOp::OpUnion as u8 {
-                                vl.min(*vr)
-                            } else {
-                                vl.max(*vr)
-                            },
-                        ),
-                        usize::MAX,
-                    )
+                    Shape::Constant(Self::constant_fold(vl, vr, f.op), usize::MAX)
                 } else {
                     // Put everything back into the composite and return it
                     f.l = l;
                     f.r = r;
                     Self::Composite(f, flag)
-                }
+                }*/
+
+                /*f.l = l;
+                f.r = r;
+                Self::Composite(f, flag)*/
             }
         }
     }
@@ -920,14 +1022,14 @@ impl Shape {
             }
             Self::Constant(v, idx) => {
                 if *idx == usize::MAX {
-                    out.push(v.to_bits() | 1);
-                    /*if *v > 0.0 {
+                    //out.push(v.to_bits() | 1);
+                    if *v > 0.0 {
                         out.push(u32::MAX);
                     } else if *v < 0.0 {
                         out.push(u32::MAX - 1);
                     } else {
-                        todo!();
-                    }*/
+                        out.push(u32::MAX);
+                    }
                 } else {
                     out.push((*idx as u32) << 1);
                 }
@@ -1001,6 +1103,7 @@ struct App {
     flatten: Vec<f32>,
     points: Vec<(Complex, (usize, usize))>,
     offset: [f32; 2],
+    mousepos: [f32; 2],
     lastpos: PhysicalPosition<f64>,
     mousedown: bool,
     draw_stats: rolling_stats::Stats<f32>,
@@ -1018,7 +1121,9 @@ impl ApplicationHandler for App {
         #[cfg(not(target_family = "wasm"))]
         let window_attributes = WindowAttributes::default()
             .with_title(env!("CARGO_CRATE_NAME"))
-            .with_inner_size(PhysicalSize::new(650, 550))
+            //.with_inner_size(PhysicalSize::new(403, 317))
+            //.with_inner_size(PhysicalSize::new(392, 307))
+            .with_inner_size(PhysicalSize::new(650, 650))
             .with_resizable(true);
         #[cfg(target_family = "wasm")]
         let window_attributes = WindowAttributes::default()
@@ -1105,8 +1210,9 @@ impl ApplicationHandler for App {
         use euclid::default::Point2D;
         use euclid::default::Size2D;
 
-        self.quad_v.resize(1 << 17, 0);
+        self.quad_v.resize(1 << 15, 0);
         let timer = std::time::Instant::now();
+        let mut hmap = HashMap::new();
         build_quadtree(
             Box2D::from_origin_and_size(
                 Point2D::new(config.width as f32 * -0.5, config.height as f32 * -0.5),
@@ -1115,6 +1221,7 @@ impl ApplicationHandler for App {
             &mut self.quad_v,
             &self.composite,
             &self.points,
+            &mut hmap,
         );
         let diff = std::time::Instant::now() - timer;
         self.quad_stats.update(diff.as_secs_f32() * 1000.0);
@@ -1226,6 +1333,9 @@ impl ApplicationHandler for App {
                 let state = self.state.as_mut().expect("resize event without a window");
 
                 let config = &mut state.config;
+                if config.width == size.width && config.height == size.height {
+                    return; // nothing to do
+                }
                 config.width = size.width;
                 config.height = size.height;
                 state.surface.configure(&state.driver.device, config);
@@ -1239,6 +1349,7 @@ impl ApplicationHandler for App {
                     self.quad_v.clear();
 
                     let timer = std::time::Instant::now();
+                    let mut hmap = HashMap::new();
                     build_quadtree(
                         Box2D::from_origin_and_size(
                             Point2D::new(config.width as f32 * -0.5, config.height as f32 * -0.5),
@@ -1247,6 +1358,7 @@ impl ApplicationHandler for App {
                         &mut self.quad_v,
                         &self.composite,
                         &self.points,
+                        &mut hmap,
                     );
                     let diff = std::time::Instant::now() - timer;
                     self.quad_stats.update(diff.as_secs_f32() * 1000.0);
@@ -1275,7 +1387,9 @@ impl ApplicationHandler for App {
                             label: Some("Root Encoder"),
                         });
 
-                state.draw(encoder, self.offset).expect("draw failure");
+                state
+                    .draw(encoder, self.offset, self.mousepos)
+                    .expect("draw failure");
                 let timestamps = state.driver.get_timestamps();
 
                 let diffms = ((timestamps[1] - timestamps[0]) as f32
@@ -1314,6 +1428,8 @@ impl ApplicationHandler for App {
                 println!("{:?}", self.points);*/
             }
             WindowEvent::CursorMoved { position, .. } => {
+                self.mousepos[0] = position.x as f32;
+                self.mousepos[1] = position.y as f32;
                 if self.mousedown {
                     if !self.lastpos.x.is_nan() && !self.lastpos.y.is_nan() {
                         self.offset[0] -= (position.x - self.lastpos.x) as f32;
@@ -1479,25 +1595,76 @@ fn is_large_shape(s: &Shape) -> bool {
 
 pub const QUAD_CHILD: u32 = 1 << 31;
 
+pub static DEBUG_COUNT: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+impl PartialEq for Shape {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Circle(_, _, i) | Self::HalfPlane(_, _, i) | Self::Bezier(_, _, i),
+                Self::Circle(_, _, j) | Self::HalfPlane(_, _, j) | Self::Bezier(_, _, j),
+            ) => *i == *j,
+            (Self::Constant(l, i), Self::Constant(r, j)) => {
+                if *i != *j {
+                    return false;
+                }
+                if *i == usize::MAX {
+                    (*l >= 0.0 && *r >= 0.0) || (*l < 0.0 && *r < 0.0)
+                } else {
+                    true
+                }
+            }
+            (Self::Composite(l, i), Self::Composite(r, j)) => {
+                i == j && l.l.eq(&r.l) && l.r.eq(&r.r)
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Shape {}
+
+impl std::hash::Hash for Shape {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        core::mem::discriminant(self).hash(state);
+
+        match &self {
+            Self::Circle(_, _, idx) | Self::HalfPlane(_, _, idx) | Self::Bezier(_, _, idx) => {
+                state.write_usize(*idx);
+            }
+            Self::Constant(v, idx) => {
+                state.write_usize(*idx);
+                state.write_u32(v.to_bits());
+            }
+            Self::Composite(f, flag) => {
+                state.write_usize(*flag);
+                f.l.hash(state);
+                f.r.hash(state);
+            }
+        }
+    }
+}
+
 pub fn build_quadtree(
     area: euclid::default::Box2D<f32>,
     v: &mut Vec<u32>,
     sdf: &Shape,
     points: &[(sdf::Complex, (usize, usize))],
+    hmap: &mut HashMap<Shape, u32>,
 ) -> u32 {
     use euclid::default::Box2D;
     use euclid::default::Point2D;
-    const MIN_SIZE: f32 = 10.0;
-    let centroid = area.center();
+    const MIN_SIZE: f32 = 16.0;
+    let centroid = area.center(); //+ Vector2D::new(5.0, 5.0);
     let mut nearest = Complex::new(f32::MAX, f32::MAX);
 
-    //if centroid.distance_to(Point2D::new(285.0, 205.0)) < 80.0 {
-    //
+    //if centroid.distance_to(Point2D::new(439.0 - 325.0, -(379.0 - 325.0))) < 10.0 {
+    //    // DEBUG
     //    nearest = nearest;
     //}
 
     sdf.nbp(&sdf, centroid.into(), &mut nearest, points);
-    let trimmed = sdf.trim_shape(
+    let mut trimmed = sdf.trim_shape(
         sdf::Complex::new(centroid.x, centroid.y),
         nearest,
         Complex::new(area.width(), area.height()).mag(),
@@ -1526,16 +1693,48 @@ pub fn build_quadtree(
         v.extend_from_slice(&[0, 0, 0, 0]);
 
         let begin = idx as usize;
-        for i in (begin..begin + 4).rev() {
-            v[i] = build_quadtree(q[i - begin], v, &sdf, points);
+        for i in begin..begin + 4 {
+            v[i] = build_quadtree(q[i - begin], v, &sdf, points, hmap);
         }
 
         idx
     } else {
         v.push(0);
-        let count = trimmed.to_indirect_array(v);
-        v[idx as usize] = count;
-        idx | QUAD_CHILD
+        /*
+        if DEBUG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 106 {
+            if let Shape::Composite(f, _) = &mut trimmed {
+                if let Shape::Composite(ff, _) = &mut f.l {
+                    if let Shape::Constant(t, _) = &mut ff.r {
+                        // println!("catch: {}", *t);
+                        // *t = -*t;
+                    }
+                }
+                let check = sdf.trim_shape(
+                    sdf::Complex::new(centroid.x, centroid.y),
+                    nearest,
+                    Complex::new(area.width(), area.height()).mag(),
+                    points,
+                );
+            }
+            let count = trimmed.to_indirect_array(v);
+            v[idx as usize] = count;
+        } else { */
+        if let Some(v) = hmap.get(&trimmed) {
+            let c = DEBUG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            v | QUAD_CHILD
+        } else {
+            let count = trimmed.to_indirect_array(v);
+            v[idx as usize] = count;
+
+            if hmap.len() % 100 == 0 {
+                println!("total: {}", hmap.len());
+                println!("sample: {:?}", &v[idx as usize..(idx + count) as usize]);
+            }
+
+            hmap.insert(trimmed, idx);
+            idx | QUAD_CHILD
+        }
+        //}
     }
 }
 
@@ -1549,7 +1748,7 @@ fn gen_shape(pos: Complex, radius: f32, rng: &mut Xoshiro128PlusPlus) -> Shape {
     match 0 {
         0 => Shape::circle(
             (range.sample(rng) + pos.x, range.sample(rng) + pos.y),
-            rng.random_range(radius * 0.25..=radius * 0.5),
+            rng.random_range(radius * 0.12..=radius * 0.25),
         ),
         1 => Shape::halfplane(
             (rng.random_range(0.0..=pos.y), 1.0),
@@ -1558,8 +1757,13 @@ fn gen_shape(pos: Complex, radius: f32, rng: &mut Xoshiro128PlusPlus) -> Shape {
         _ => panic!("2 + 2 != 4??"),
     }
 }
-fn gen_composite_shape(n: usize, radius: f32, rng: &mut Xoshiro128PlusPlus) -> Shape {
-    let mut pos = Complex::new(0.0, 0.0);
+fn gen_composite_shape(
+    n: usize,
+    radius: f32,
+    offset: Complex,
+    rng: &mut Xoshiro128PlusPlus,
+) -> Shape {
+    let mut pos = offset;
 
     let mut composite = gen_shape(pos, radius, rng);
 
@@ -1579,6 +1783,21 @@ fn gen_composite_shape(n: usize, radius: f32, rng: &mut Xoshiro128PlusPlus) -> S
 
     composite
 }
+
+fn gen_grid_shape(w: usize, h: usize, radius: f32, offset: Complex) -> Shape {
+    let dist = radius * 4.0;
+    let mut composite = Shape::circle((offset.x - dist, offset.y - dist), radius);
+    for i in 0..w {
+        for j in 0..h {
+            composite = composite
+                | Shape::circle(
+                    (offset.x + dist * i as f32, offset.y + dist * j as f32),
+                    radius,
+                );
+        }
+    }
+    composite
+}
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_family = "wasm")]
     console_error_panic_hook::set_once();
@@ -1592,17 +1811,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let b2 = Shape::bezier([(320.0, 0.0), (-640.0, 0.0), (320.0, 120.0)]);
 
     //u (i (n (u (n (hp exampleHalfPlanes[0])) (hp exampleHalfPlanes[1]))) (i (n (disk exampleDisks[0])) (disk exampleDisks[1]))) (bez exampleBezier2o2ds[0])
-    let mut composite = ((-((-hp1) | hp2)) & ((-c1) & c2)) | (b1 | b2);
+    //let mut composite = ((-((-hp1) | hp2)) & ((-c1) & c2)) | (b1 | b2);
 
-    //let mut rng = Xoshiro128PlusPlus::from_seed(2873493u128.to_le_bytes());
-    //let mut composite = gen_composite_shape(30, 50.0, &mut rng);
-    //let mut composite = b1 | b2;
+    let mut rng = Xoshiro128PlusPlus::from_seed(2873493u128.to_le_bytes());
+    let mut composite = gen_composite_shape(600, 50.0, Complex::new(200.0, 0.0), &mut rng);
+    //let mut composite = ((-((-hp1) | hp2)) | (c2));
+    //let mut composite = ((hp1) & -hp2) | (c2);
 
+    //let mut composite = gen_grid_shape(7, 7, 20.0, Complex::new(-200.0, -200.0));
     let box1 = Shape::halfplane((30.0 - (-30.0), (-200.0) - 200.0), 0.5);
     let box2 = Shape::halfplane((30.0 - (-30.0), 200.0 - (-200.0)), -0.5);
     //let mut composite = box1 | box2;
     //let shapes = Vec::from_iter(composite.iter());
     //println!("shapes: {shapes:?}");
+    composite = composite.demorgan(false);
     let flatten = composite.to_array();
     let points = Vec::from_iter(
         implied_points(composite.iter()).filter(|(x, _)| is_boundary_point(&composite, *x)),
@@ -1617,6 +1839,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         points,
         lastpos: PhysicalPosition { x: 0.0, y: 0.0 },
         offset: [0.0, 0.0],
+        mousepos: [0.0, 0.0],
         mousedown: false,
         draw_stats: Default::default(),
         compute_stats: Default::default(),
