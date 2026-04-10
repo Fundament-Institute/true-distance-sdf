@@ -311,7 +311,7 @@ const OP_INTERSECT: u32 = 1;
 const SHAPE_CIRCLE: u32 = 2;
 const SHAPE_LINE: u32 = 3;
 const SHAPE_BEZIER: u32 = 4;
-const SHAPE_POLYGON: u32 = 5;
+const SHAPE_CONSTANT: u32 = 5;
 const OP_NEGATE: u32 = 8;
 const OP_HOLLOW: u32 = 16;
 const OP_MASK: u32 = OP_NEGATE - 1;
@@ -405,6 +405,10 @@ fn shapefunc(pos: vec2f) -> vec2f {
   var nearest = vec2f(MAX_F32, MAX_F32);
   var lastdist_sq = MAX_F32;
   for (var i = 0u; i < arrayLength(&points); i++) {
+    if !isFinite(points[i].x) {
+      break;
+    }
+
     let dist = mag_sq(points[i] - pos);
 
     // We can skip isBoundaryPoint here because the intersection points are prefiltered
@@ -458,12 +462,31 @@ fn shapefunc(pos: vec2f) -> vec2f {
 }
 
 fn indirect_shapeField(pos: vec2f, start: u32) -> f32 {
-  let end = start + quadtree[start];
+  let end = start + quadtree[start] + 1;
   var stack = array<f32, 32>();
   var len = 0;
 
   for (var idx = start + 1; idx < end; idx++) {
-    let i = quadtree[idx];
+    var i = quadtree[idx];
+    /*if i == 0xFFFFFFFF {
+      stack[len] = 999999999.0;
+      len += 1;
+      continue;
+    }
+    else if i == 0xFFFFFFFE {
+      stack[len] = - 999999999.0;
+      len += 1;
+      continue;
+    }*/
+
+    if (i & 1) != 0 {
+      stack[len] = bitcast<f32>(i);
+      len += 1;
+      continue;
+    }
+
+    i = i >> 1;
+
     let op = bitcast<u32>(shapes[i]);
     switch op & OP_MASK {
       case OP_UNION, OP_INTERSECT: {
@@ -503,6 +526,9 @@ fn indirect_shapefunc(pos: vec2f, start: u32) -> vec2f {
   var nearest = vec2f(MAX_F32, MAX_F32);
   var lastdist_sq = MAX_F32;
   for (var i = 0u; i < arrayLength(&points); i++) {
+    if !isFinite(points[i].x) {
+      break;
+    }
     let dist = mag_sq(points[i] - pos);
 
     // We can skip isBoundaryPoint here because the intersection points are prefiltered
@@ -515,7 +541,13 @@ fn indirect_shapefunc(pos: vec2f, start: u32) -> vec2f {
   var p = vec2f(MAX_F32, MAX_F32);
 
   for (var idx = start + 1; idx < end; idx++) {
-    let i = quadtree[idx];
+    var i = quadtree[idx];
+    //if i == 0xFFFFFFFF || i == 0xFFFFFFFE {
+    if (i & 1) != 0 {
+      continue;
+    }
+    i = i >> 1;
+
     let opshape = bitcast<u32>(shapes[i]);
 
     switch opshape & OP_MASK {
@@ -530,7 +562,7 @@ fn indirect_shapefunc(pos: vec2f, start: u32) -> vec2f {
         p = pt[0];
 
         let dist = mag_sq(pt[1] - pos);
-        if dist < lastdist_sq && isBoundaryPoint(pt[1]) {
+        if dist < lastdist_sq && indirect_isBoundaryPoint(pt[1], start) {
           lastdist_sq = dist;
           nearest = pt[1];
         }
@@ -544,7 +576,7 @@ fn indirect_shapefunc(pos: vec2f, start: u32) -> vec2f {
     }
 
     let dist = mag_sq(p - pos);
-    if dist < lastdist_sq && isBoundaryPoint(p) {
+    if dist < lastdist_sq && indirect_isBoundaryPoint(p, start) {
       lastdist_sq = dist;
       nearest = p;
     }
@@ -583,65 +615,227 @@ fn traverse(pos: vec2f) -> vec2f {
   var idx = 0u;
   var offset = config.dim * - 0.5;
 
-  //debug
-  let flip = vec2f(pos.x, pos.y);
-
   while (idx < arrayLength(&quadtree)) {
     dim *= 0.5;
-    let p = flip;
-    let child = select(0u, 1u, p.x > offset.x + dim.x) | select(0u, 2u, p.y > offset.y + dim.y);
+    let child = select(0u, 1u, pos.x > offset.x + dim.x) | select(0u, 2u, pos.y > offset.y + dim.y);
     offset.x += dim.x * f32(child & 1);
     offset.y += dim.y * f32((child & 2) >> 1);
 
     if (quadtree[idx + child] & QUAD_CHILD) != 0 {
-      //return debug_viz(quadtree[idx + child] & (~QUAD_CHILD));
       return indirect_shapefunc(pos, quadtree[idx + child] & (~QUAD_CHILD));
-      //return shapefunc(pos);
     }
 
     idx = quadtree[idx + child];
     if idx == 0 {
-      // TODO: shouldn't happen if quadtree is valid
       break;
     }
+    // TODO: shouldn't happen if quadtree is valid
   }
 
   return vec2f(0.0);
 }
 
+fn boolf_halfplane(hp: HalfPlane, pos: vec2f) -> bool {
+  return psdf_halfplane(hp, pos) < 0.0;
+}
+
+fn boolf_point(p: vec2f, pos: vec2f) -> bool {
+  return false;
+}
+
+fn boolf_disk(d: Circle, pos: vec2f) -> bool {
+  return mag_sq(pos - d.center) < d.radius * d.radius;
+}
+
+fn boolf_bez(bez: Bezier2o2d, pos: vec2f) -> bool {
+  return false;
+}
+
+fn boolf_negate(x: bool) -> bool {
+  return !x;
+}
+
+fn boolf_hollow(x: bool) -> bool {
+  return false;
+}
+
+fn boolf_union(l: bool, r: bool) -> bool {
+  return l || r;
+}
+
+fn boolf_intersect(l: bool, r: bool) -> bool {
+  return l && r;
+}
+
+fn unary_bool(x: bool, op: u32) -> bool {
+  let r = select(x, boolf_negate(x), (op & OP_NEGATE) != 0);
+  return select(r, boolf_hollow(r), (op & OP_HOLLOW) != 0);
+}
+
+fn shape_boolF(pos: vec2f) -> bool {
+  var stack: u32 = 0u;
+  var len = 0;
+
+  for (var i = 0u; i < arrayLength(&shapes);) {
+    let op = bitcast<u32>(shapes[i]);
+    switch op & OP_MASK {
+      case OP_UNION, OP_INTERSECT: {
+        let r = (stack & (1u << u32(len - 1))) != 0u;
+        let l = (stack & (1u << u32(len - 2))) != 0u;
+        let b = unary_bool(select(boolf_intersect(l, r), boolf_union(l, r), (op & OP_MASK) == OP_UNION), op);
+        let bit = (1u << u32(len - 2));
+        stack = (stack & (~bit)) | select(0u, bit, b);
+        len -= 1;
+        i += 1;
+      }
+      case SHAPE_CIRCLE: {
+        let b = unary_bool(boolf_disk(Circle(vec2f(shapes[i + 1], shapes[i + 2]), shapes[i + 3]), pos), op);
+        let bit = (1u << u32(len));
+        stack = (stack & (~bit)) | select(0u, bit, b);
+        len += 1;
+        i += 4;
+      }
+      case SHAPE_BEZIER: {
+        let b = unary_bool(boolf_bez(Bezier2o2d(vec2f(shapes[i + 1], shapes[i + 2]), vec2f(shapes[i + 3], shapes[i + 4]), vec2f(shapes[i + 5], shapes[i + 6])), pos), op);
+        let bit = (1u << u32(len));
+        stack = (stack & (~bit)) | select(0u, bit, b);
+        len += 1;
+        i += 7;
+      }
+      case SHAPE_LINE: {
+        let b = unary_bool(boolf_halfplane(HalfPlane(vec2f(shapes[i + 1], shapes[i + 2]), shapes[i + 3]), pos), op);
+        let bit = (1u << u32(len));
+        stack = (stack & (~bit)) | select(0u, bit, b);
+        len += 1;
+        i += 4;
+      }
+      default : {
+        return false;
+      }
+    }
+  }
+
+  return (stack & 1) != 0;
+}
+
+fn draw_sdf(dist: f32, inside: bool) -> vec4f {
+  let d = dist * 0.005;
+  // This coloring method taken from Inigo Quilez, used under the MIT license: https://www.shadertoy.com/view/MlKcDD
+  var col = select(vec3f(0.9, 0.6, 0.3), vec3f(0.65, 0.85, 1.0), inside);
+  col *= 1.0 - exp(- 4.0 * abs(d));
+  col *= 0.8 + 0.2 * cos(110.0 * d);
+  col = mix(col, vec3(1.0), 1.0 - smoothstep(0.0, 0.01, abs(d)));
+
+  return srgb_to_linear_vec4(vec4f(col, 1.0));
+}
+
 @fragment
 fn tdf(input: VertexOutput) -> @location(0) vec4f {
-  let line_width: f32 = 1.25;
-  let band_width: f32 = 8;
   let pos = input.uv;
   //return vec4f(pos.x / 400.0, pos.y / 300.0, 0, 1);
   //return traverse(pos);
 
   //let dist = mag(pos - shapefunc(pos));
   let dist = mag(pos - traverse(pos));
-  let field = shapeField(pos);
-  let inside = field < 0;
-  let in_line = dist <= (line_width / 2);
-  let in_band = dist % (band_width * 2) >= band_width;
-  let fade = select(32 * log2(dist), 128, dist < 1);
-  let primary_colorval = select(fade, 255.0, in_line || 255 < fade);
-  var secondary_colorval = select(0.0, 255.0, in_line);
-  if in_band {
-    secondary_colorval = primary_colorval / 2;
-  }
-  let a = 255.0;
-  let r = select(primary_colorval, secondary_colorval, inside);
-  let b = select(secondary_colorval, primary_colorval, inside);
-  let g = secondary_colorval;
-  //return srgb_to_linear_vec4(vec4f(field, 0.0, 0.0, 1.0));
-  return srgb_to_linear_vec4(vec4f(r / 255.0, g / 255.0, b / 255.0, a / 255.0));
+  //let field = shapeField(pos);
+  //let inside = field < 0;
+  let inside = shape_boolF(pos);
+  return draw_sdf(dist, inside);
 }
 
+// Standard comparison SDFs from Inigo Quilez, used under the MIT license - https://iquilezles.org/articles/distfunctions2d/
+fn sdRoundedBox(p: vec2f, b: vec2f, r: vec4f) -> f32 {
+  let r2 = select(r.zw, r.xy, p.x > 0.0);
+  let r3 = select(r2.y, r2.x, p.y > 0.0);
+  let q: vec2f = abs(p) - b + r3;
+  return min(max(q.x, q.y), 0.0) + length(max(q, vec2f(0.0, 0.0))) - r3;
+}
+
+fn sdCircle(p: vec2f, center: vec2f, r: f32) -> f32 {
+  return length(p - center) - r;
+}
+
+fn dot2(v: vec2f) -> f32 {
+  return dot(v, v);
+}
+
+fn sdBezier(pos: vec2f, A: vec2f, B: vec2f, C: vec2f) -> f32 {
+  let a = B - A;
+  let b = A - 2.0 * B + C;
+  let c = a * 2.0;
+  let d = A - pos;
+  let kk = 1.0 / dot(b, b);
+  let kx = kk * dot(a, b);
+  let ky = kk * (2.0 * dot(a, a) + dot(d, b)) / 3.0;
+  let kz = kk * dot(d, a);
+  var res = 0.0;
+  let p = ky - kx * kx;
+  let p3 = p * p * p;
+  let q = kx * (2.0 * kx * kx - 3.0 * ky) + kz;
+  var h = q * q + 4.0 * p3;
+  if (h >= 0.0) {
+    h = sqrt(h);
+    let x = (vec2(h, - h) - q) / 2.0;
+    let uv = sign(x) * pow(abs(x), vec2(1.0 / 3.0));
+    let t = clamp(uv.x + uv.y - kx, 0.0, 1.0);
+    res = dot2(d + (c + b * t) * t);
+  }
+  else {
+    let z = sqrt(- p);
+    let v = acos(q / (p * z * 2.0)) / 3.0;
+    let m = cos(v);
+    let n = sin(v) * 1.732050808;
+    let t = clamp(vec3f(m + m, - n - m, n - m) * z - kx, vec3f(0.0), vec3f(1.0));
+    res = min(dot2(d + (c + b * t.x) * t.x), dot2(d + (c + b * t.y) * t.y));
+    // the third root cannot be the closest
+    // res = min(res,dot2(d+(c+b*t.z)*t.z));
+  }
+  return sqrt(res);
+}
+
+fn sdOrientedBox(p: vec2f, a: vec2f, b: vec2f, th: f32) -> f32 {
+  let l = length(b - a);
+  let d = (b - a) / l;
+  var q = p - (a + b) * 0.5;
+  q = mat2x2(d.x, d.y, - d.y, d.x) * q;
+  q = abs(q) - vec2(l * 0.5, th);
+  return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0);
+}
+
+// End standard SDFs
+
+// This simulates access patterns from a shader that picks between a few single SDF options by
+// reusing our shape storage buffer
 @fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4f {
-  let line_width: f32 = 1.25;
-  let band_width: f32 = 8;
-  let pos = input.uv;
-  return srgb_to_linear_vec4(vec4f(pos.x, pos.y, 0.0, 1.0));
-  //return srgb_to_linear_vec4(vec4f(r / 255.0, g / 255.0, b / 255.0, a / 255.0));
+fn fs_sdf(input: VertexOutput) -> @location(0) vec4f {
+  var d = 0.0;
+  for (var i = 0u; i < arrayLength(&shapes);) {
+    let kind = bitcast<u32>(shapes[0]);
+    switch kind {
+      case 0 : {
+        d += sdRoundedBox(input.uv, vec2f(shapes[1], shapes[2]), vec4f(shapes[3], shapes[4], shapes[5], shapes[6]));
+        i += 7;
+      }
+      case 1 : {
+        d += min(sdOrientedBox(input.uv, vec2f(shapes[1], shapes[2]), vec2f(shapes[3], shapes[4]), shapes[5]), sdOrientedBox(input.uv, vec2f(shapes[3], shapes[2]), vec2f(shapes[1], shapes[4]), shapes[5]));
+        i += 6;
+
+      }
+      case SHAPE_BEZIER: {
+        d += sdBezier(input.uv, vec2f(shapes[1], shapes[2]), vec2f(shapes[3], shapes[4]), vec2f(shapes[5], shapes[6]));
+        //d += psdf_bez(array(vec2f(shapes[1], shapes[2]), vec2f(shapes[3], shapes[4]), vec2f(shapes[5], shapes[6])), input.uv);
+        i += 7;
+      }
+      case SHAPE_CIRCLE: {
+        d += sdCircle(input.uv, vec2f(shapes[1], shapes[2]), shapes[3]);
+        i += 4;
+      }
+      default : {
+        d += 0.0;
+        i += 1;
+      }
+    }
+  }
+
+  return draw_sdf(d, d < 0.0);
 }
