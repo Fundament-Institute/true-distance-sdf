@@ -37,6 +37,7 @@ var<storage, read> quadtree: array<u32>;
 struct Config {
   dim: vec2f,
   pos: vec2f,
+  mouse: vec2f,
 }
 
 var<immediate> config: Config;
@@ -358,7 +359,7 @@ fn unary_op(x: f32, op: u32) -> f32 {
 }
 
 fn shapeField(pos: vec2f) -> f32 {
-  var stack = array<f32, 32>();
+  var stack = array<f32, 64>();
   var len = 0;
 
   for (var i = 0u; i < arrayLength(&shapes);) {
@@ -468,22 +469,22 @@ fn indirect_shapeField(pos: vec2f, start: u32) -> f32 {
 
   for (var idx = start + 1; idx < end; idx++) {
     var i = quadtree[idx];
-    /*if i == 0xFFFFFFFF {
-      stack[len] = 999999999.0;
+    if i == 0xFFFFFFFF {
+      stack[len] = MAX_F32;
       len += 1;
       continue;
     }
     else if i == 0xFFFFFFFE {
-      stack[len] = - 999999999.0;
-      len += 1;
-      continue;
-    }*/
-
-    if (i & 1) != 0 {
-      stack[len] = bitcast<f32>(i);
+      stack[len] = - MAX_F32;
       len += 1;
       continue;
     }
+
+    /*if (i & 1) != 0 {
+      stack[len] = bitcast<f32>(i);
+      len += 1;
+      continue;
+    }*/
 
     i = i >> 1;
 
@@ -542,8 +543,8 @@ fn indirect_shapefunc(pos: vec2f, start: u32) -> vec2f {
 
   for (var idx = start + 1; idx < end; idx++) {
     var i = quadtree[idx];
-    //if i == 0xFFFFFFFF || i == 0xFFFFFFFE {
-    if (i & 1) != 0 {
+    if i == 0xFFFFFFFF || i == 0xFFFFFFFE {
+      //if (i & 1) != 0 {
       continue;
     }
     i = i >> 1;
@@ -735,12 +736,25 @@ fn tdf(input: VertexOutput) -> @location(0) vec4f {
   //return vec4f(pos.x / 400.0, pos.y / 300.0, 0, 1);
   //return traverse(pos);
 
-  //let dist = mag(pos - shapefunc(pos));
-  let dist = mag(pos - traverse(pos));
+  let nearest = traverse(pos);
+  //let nearest = shapefunc(pos);
+  let dist = mag(pos - nearest);
   //let field = shapeField(pos);
   //let inside = field < 0;
   let inside = shape_boolF(pos);
-  return draw_sdf(dist, inside);
+
+  var col = draw_sdf(dist, inside);
+  {
+    let m = (config.mouse - (config.dim * 0.5)) * vec2f(1.0, - 1.0) + config.pos;
+    let q = traverse(m);
+    let d = mag(pos - q);
+
+    //col = vec4f(mix(col.rgb, vec3(1.0, 1.0, 0.0), 1.0 - smoothstep(0.0, 1.0, abs(length(pos - m) - (d / 2.0)))), col.a);
+    col = vec4f(mix(col.rgb, vec3(1.0, 1.0, 0.0), 1.0 - smoothstep(0.0, 1.0, length(pos - m) - 5)), col.a);
+    col = vec4f(mix(col.rgb, vec3(1.0, 1.0, 0.0), 1.0 - smoothstep(0.0, 1.0, length(pos - q) - 5)), col.a);
+  }
+
+  return col;
 }
 
 // Standard comparison SDFs from Inigo Quilez, used under the MIT license - https://iquilezles.org/articles/distfunctions2d/
