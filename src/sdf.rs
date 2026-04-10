@@ -187,8 +187,8 @@ type Real = f32;
 )]
 #[repr(C)]
 pub struct Complex {
-    x: f32,
-    y: f32,
+    pub x: f32,
+    pub y: f32,
 }
 
 impl Eq for Complex {}
@@ -1151,7 +1151,7 @@ fn halfPlaneToLineFunc(hp: HalfPlane, x: Real) -> Real {
     )
 }
 
-pub fn twoLinesIntersect(a: HalfPlane, b: HalfPlane) -> Complex {
+/*pub fn twoLinesIntersect(a: HalfPlane, b: HalfPlane) -> Complex {
     a.normal.mul(Complex::new(
         a.shift,
         halfPlaneToLineFunc(
@@ -1162,6 +1162,13 @@ pub fn twoLinesIntersect(a: HalfPlane, b: HalfPlane) -> Complex {
             a.shift,
         ),
     ))
+}*/
+
+pub fn twoLinesIntersect(a: HalfPlane, b: HalfPlane) -> Complex {
+    let det = det2x2Accurate(a.normal, b.normal);
+    let x = a.shift.mul_add(b.normal.y, -b.shift * a.normal.y) / det;
+    let y = a.normal.x.mul_add(b.shift, -b.normal.x * a.shift) / det;
+    Complex::new(x, y)
 }
 
 pub fn isBoundaryPoint(f: &impl Fn(Complex) -> Real, pos: Complex) -> bool {

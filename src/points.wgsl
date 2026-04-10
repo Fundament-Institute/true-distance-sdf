@@ -605,43 +605,6 @@ fn twoBezier2o2dsIntersect(bez0: Bezier2o2d, bez1: Bezier2o2d) -> array<vec2f, 4
     }
 }
 
-/*fn num_intersections(idx: vec2<u32>) -> u32 {
-    // In the case where we are comparing something with itself, we simply output any unconditional points
-    if idx.x == idx.y {
-        let v = bitcast<u32>(shapes[shape_idx[idx.x]]) & OP_MASK;
-        // Currently only beziers return points unconditionally
-        return select(0u, 2u, v == SHAPE_BEZIER);
-    }
-
-    let l = bitcast<u32>(shapes[shape_idx[idx.x]]) & OP_MASK;
-    let r = bitcast<u32>(shapes[shape_idx[idx.y]]) & OP_MASK;
-    switch (r << 3) | l {
-        case (SHAPE_CIRCLE << 3) | SHAPE_CIRCLE: {
-            return 2u;
-        }
-        case (SHAPE_LINE << 3) | SHAPE_LINE: {
-            return 1u;
-        }
-        case (SHAPE_LINE << 3) | SHAPE_CIRCLE, (SHAPE_CIRCLE << 3) | SHAPE_LINE: {
-            return 2u;
-        }
-        case (SHAPE_BEZIER << 3) | SHAPE_BEZIER: {
-            return 4u;
-        }
-        case (SHAPE_BEZIER << 3) | SHAPE_CIRCLE, (SHAPE_CIRCLE << 3) | SHAPE_BEZIER: {
-            return 4u;
-        }
-        case (SHAPE_LINE << 3) | SHAPE_BEZIER, (SHAPE_BEZIER << 3) | SHAPE_LINE: {
-            return 2u;
-        }
-        default: {
-            return 0u;
-        }
-    }
-
-    return 0u;
-}*/
-
 fn complex_mulAdd(a: vec2f, b: vec2f, c: vec2f) -> vec2f {
     return vec2f(fma((- a.y), b.y, fma(a.x, b.x, c.x)), fma(a.y, b.x, fma(a.x, b.y, c.y)));
 }
@@ -671,7 +634,10 @@ fn halfPlaneToLineFunc(normal: vec2f, shift: f32, x: f32) -> f32 {
 }
 
 fn twoLinesIntersect(a_normal: vec2f, a_shift: f32, b_normal: vec2f, b_shift: f32) -> vec2f {
-    return complex_mul(a_normal, vec2f(a_shift, halfPlaneToLineFunc(complex_mul(b_normal, conj(a_normal)), b_shift, a_shift)));
+    let det = det2x2Accurate(a_normal, b_normal);
+    let x = fma(a_shift, b_normal.y, - b_shift * a_normal.y) / det;
+    let y = fma(a_normal.x, b_shift, - b_normal.x * a_shift) / det;
+    return vec2f(x, y);
 }
 
 @group(0) @binding(0)
