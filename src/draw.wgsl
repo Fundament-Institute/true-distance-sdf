@@ -29,59 +29,78 @@ fn isFinite(x: f32) -> bool {
 var<storage, read> shapes: array<f32>;
 
 @group(0) @binding(1)
-var<storage, read> kdtree: array<f32>;
+var<storage, read> kdtree: array<u32>;
 //var<storage, read> points: array<vec2f>;
 
 @group(0) @binding(2)
 var<storage, read> quadtree: array<u32>;
 
 const KD_CHILD: u32 = (1u << 31u);
+const KD_ESIZE: u32 = 4;
 
 fn get_nearest_point(input: vec2f) -> vec2f {
-  var idx = 0u;
-  var axis = 0u;
   let pos = array(input.x, input.y);
+  var stack = array<vec2<u32>, 64>();
+  var best_point = vec2f(MAX_F32, MAX_F32);
+  var best_dist_sq = MAX_F32;
+  var len = 1;
+  stack[0] = vec2u(0, 0);
 
-  while (true) {
-    let split = kdtree[idx];
+  while len > 0 {
+    len -= 1;
+    let idx = stack[len].x;
+    let axis = stack[len].y;
 
-    var pick = select(1u, 0u, pos[axis] < split);
-    var child = bitcast<u32>(kdtree[idx + pick + 1u]);
-    child = select(child, bitcast<u32>(kdtree[idx + ((pick + 1u) & 1u) + 1u]), child == 0);
-
-    if child == 0u {
-      break;
-    }
-
-    if (child & KD_CHILD) != 0u {
-      idx = child & (~KD_CHILD);
-      let count = bitcast<u32>(kdtree[idx]);
-      var nearest = vec2f(MAX_F32, MAX_F32);
-      var lastdist_sq = MAX_F32;
-      // size of each point element, which might be larger than (f32, f32) if auxilliary information exists
-      const ESIZE = 4u;
-
+    if (idx & KD_CHILD) != 0 {
+      // leaf node
+      let idx = (idx & (~KD_CHILD));
+      let count = kdtree[idx];
+      if count == 0 {
+        continue;
+      }
       for (var i = 0u; i < count; i++) {
-        let point = vec2f(kdtree[idx + 1u + (i * ESIZE)], kdtree[idx + 1u + (i * ESIZE) + 1u]);
-
-        let dist = mag_sq(point - input);
-
-        // We can skip isBoundaryPoint here because the intersection points are prefiltered
-        if dist < lastdist_sq {
-          lastdist_sq = dist;
-          nearest = point;
+        let point = vec2f(bitcast<f32>(kdtree[idx + 1 + (i * KD_ESIZE)]), bitcast<f32>(kdtree[idx + 1 + (i * KD_ESIZE) + 1]),);
+        let dist_sq = mag_sq(point - input);
+        if dist_sq < best_dist_sq {
+          best_dist_sq = dist_sq;
+          best_point = point;
         }
       }
-
-      return nearest;
     }
-
-    idx = child;
-
-    axis = (axis + 1u) & 1u;
+    else {
+      // internal node
+      let split = bitcast<f32>(kdtree[idx]);
+      let left = kdtree[idx + 1];
+      let right = kdtree[idx + 2];
+      let dist = pos[axis] - split;
+      if dist * dist < best_dist_sq {
+        // may need to check both subtrees
+        let pick = select(1u, 0u, pos[axis] < split);
+        let closer = select(right, left, pick == 0);
+        let farther = select(left, right, pick == 0);
+        // push farther first, then closer (so closer is processed first)
+        if farther != 0 {
+          stack[len] = vec2u(farther, (axis + 1) & 1);
+          len += 1;
+        }
+        if closer != 0 {
+          stack[len] = vec2u(closer, (axis + 1) & 1);
+          len += 1;
+        }
+      }
+      else {
+        // only check the subtree on the side of pos
+        let pick = select(1u, 0u, pos[axis] < split);
+        let child = kdtree[idx + pick + 1];
+        if child != 0 {
+          stack[len] = vec2u(child, (axis + 1) & 1);
+          len += 1;
+        }
+      }
+    }
   }
 
-  return vec2f(MAX_F32, MAX_F32);
+  return best_point;
 }
 
 /*fn get_nearest_point(pos: vec2f) -> vec2f {
@@ -100,6 +119,8 @@ fn get_nearest_point(input: vec2f) -> vec2f {
       nearest = points[i];
     }
   }
+
+  return nearest;
 }*/
 
 struct Config {
