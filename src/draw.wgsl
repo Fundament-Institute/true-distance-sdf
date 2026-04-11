@@ -29,10 +29,78 @@ fn isFinite(x: f32) -> bool {
 var<storage, read> shapes: array<f32>;
 
 @group(0) @binding(1)
-var<storage, read> points: array<vec2f>;
+var<storage, read> kdtree: array<f32>;
+//var<storage, read> points: array<vec2f>;
 
 @group(0) @binding(2)
 var<storage, read> quadtree: array<u32>;
+
+const KD_CHILD: u32 = (1u << 31u);
+
+fn get_nearest_point(input: vec2f) -> vec2f {
+  var idx = 0u;
+  var axis = 0u;
+  let pos = array(input.x, input.y);
+
+  while (true) {
+    let split = kdtree[idx];
+
+    var pick = select(1u, 0u, pos[axis] < split);
+    var child = bitcast<u32>(kdtree[idx + pick + 1u]);
+    child = select(child, bitcast<u32>(kdtree[idx + ((pick + 1u) & 1u) + 1u]), child == 0);
+
+    if child == 0u {
+      break;
+    }
+
+    if (child & KD_CHILD) != 0u {
+      idx = child & (~KD_CHILD);
+      let count = bitcast<u32>(kdtree[idx]);
+      var nearest = vec2f(MAX_F32, MAX_F32);
+      var lastdist_sq = MAX_F32;
+      // size of each point element, which might be larger than (f32, f32) if auxilliary information exists
+      const ESIZE = 4u;
+
+      for (var i = 0u; i < count; i++) {
+        let point = vec2f(kdtree[idx + 1u + (i * ESIZE)], kdtree[idx + 1u + (i * ESIZE) + 1u]);
+
+        let dist = mag_sq(point - input);
+
+        // We can skip isBoundaryPoint here because the intersection points are prefiltered
+        if dist < lastdist_sq {
+          lastdist_sq = dist;
+          nearest = point;
+        }
+      }
+
+      return nearest;
+    }
+
+    idx = child;
+
+    axis = (axis + 1u) & 1u;
+  }
+
+  return vec2f(MAX_F32, MAX_F32);
+}
+
+/*fn get_nearest_point(pos: vec2f) -> vec2f {
+  var nearest = vec2f(MAX_F32, MAX_F32);
+  var lastdist_sq = MAX_F32;
+  for (var i = 0u; i < arrayLength(&points); i++) {
+    if !isFinite(points[i].x) {
+      break;
+    }
+
+    let dist = mag_sq(points[i] - pos);
+
+    // We can skip isBoundaryPoint here because the intersection points are prefiltered
+    if dist < lastdist_sq {
+      lastdist_sq = dist;
+      nearest = points[i];
+    }
+  }
+}*/
 
 struct Config {
   dim: vec2f,
@@ -403,21 +471,8 @@ fn isBoundaryPoint(pos: vec2f) -> bool {
 }
 
 fn shapefunc(pos: vec2f) -> vec2f {
-  var nearest = vec2f(MAX_F32, MAX_F32);
-  var lastdist_sq = MAX_F32;
-  for (var i = 0u; i < arrayLength(&points); i++) {
-    if !isFinite(points[i].x) {
-      break;
-    }
-
-    let dist = mag_sq(points[i] - pos);
-
-    // We can skip isBoundaryPoint here because the intersection points are prefiltered
-    if dist < lastdist_sq {
-      lastdist_sq = dist;
-      nearest = points[i];
-    }
-  }
+  var nearest = get_nearest_point(pos);
+  var lastdist_sq = mag_sq(nearest - pos);
 
   var p = vec2f(MAX_F32, MAX_F32);
 
@@ -524,20 +579,8 @@ fn indirect_isBoundaryPoint(pos: vec2f, start: u32) -> bool {
 fn indirect_shapefunc(pos: vec2f, start: u32) -> vec2f {
   let end = start + 1 + quadtree[start];
 
-  var nearest = vec2f(MAX_F32, MAX_F32);
-  var lastdist_sq = MAX_F32;
-  for (var i = 0u; i < arrayLength(&points); i++) {
-    if !isFinite(points[i].x) {
-      break;
-    }
-    let dist = mag_sq(points[i] - pos);
-
-    // We can skip isBoundaryPoint here because the intersection points are prefiltered
-    if dist < lastdist_sq {
-      lastdist_sq = dist;
-      nearest = points[i];
-    }
-  }
+  var nearest = get_nearest_point(pos);
+  var lastdist_sq = mag_sq(nearest - pos);
 
   var p = vec2f(MAX_F32, MAX_F32);
 

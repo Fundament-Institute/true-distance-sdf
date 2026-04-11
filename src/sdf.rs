@@ -191,6 +191,18 @@ pub struct Complex {
     pub y: f32,
 }
 
+impl std::ops::Index<usize> for Complex {
+    type Output = f32;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        match index {
+            0 => &self.x,
+            1 => &self.y,
+            _ => panic!("invalid index"),
+        }
+    }
+}
+
 impl Eq for Complex {}
 
 impl Ord for Complex {
