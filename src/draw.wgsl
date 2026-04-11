@@ -29,78 +29,66 @@ fn isFinite(x: f32) -> bool {
 var<storage, read> shapes: array<f32>;
 
 @group(0) @binding(1)
-var<storage, read> kdtree: array<u32>;
+var<storage, read> kdtree: array<vec4<u32>>;
 //var<storage, read> points: array<vec2f>;
 
 @group(0) @binding(2)
 var<storage, read> quadtree: array<u32>;
 
-const KD_CHILD: u32 = (1u << 31u);
-const KD_ESIZE: u32 = 4;
+fn get_nearest_point(query: vec2f) -> vec3f {
+  var nearest_item = vec2f(bitcast<f32>(kdtree[0].x), bitcast<f32>(kdtree[0].y));
+  if nearest_item.x == MAX_F32 {
+    return vec3f(MAX_F32, MAX_F32, MAX_F32);
+  }
+  var best_distance = mag_sq(query - nearest_item);
+  var stack = array<vec3<u32>, 64>();
 
-fn get_nearest_point(input: vec2f) -> vec3f {
-  let pos = array(input.x, input.y);
-  var stack = array<vec2<u32>, 64>();
-  var best_point = vec2f(MAX_F32, MAX_F32);
-  var best_dist_sq = MAX_F32;
+  stack[0] = vec3u(0, arrayLength(&kdtree), 0);
   var len = 1;
-  stack[0] = vec2u(0, 0);
 
   while len > 0 {
     len -= 1;
-    let idx = stack[len].x;
-    let axis = stack[len].y;
+    let begin = stack[len].x;
+    let end = stack[len].y;
+    let axis = stack[len].z;
 
-    if (idx & KD_CHILD) != 0 {
-      // leaf node
-      let idx = (idx & (~KD_CHILD));
-      let count = kdtree[idx];
-      if count == 0 {
+    let mid_idx = begin + ((end - begin) / 2);
+    let item = vec2f(bitcast<f32>(kdtree[mid_idx].x), bitcast<f32>(kdtree[mid_idx].y));
+
+    let squared_distance = mag_sq(query - item);
+    if squared_distance < best_distance {
+      nearest_item = item;
+      best_distance = squared_distance;
+      if best_distance == 0 {
         continue;
       }
-      for (var i = 0u; i < count; i++) {
-        let point = vec2f(bitcast<f32>(kdtree[idx + 1 + (i * KD_ESIZE)]), bitcast<f32>(kdtree[idx + 1 + (i * KD_ESIZE) + 1]),);
-        let dist_sq = mag_sq(point - input);
-        if dist_sq < best_dist_sq {
-          best_dist_sq = dist_sq;
-          best_point = point;
-        }
+    }
+    let mid_pos = select(item.y, item.x, axis == 0);
+    var b1_start = begin;
+    var b1_end = mid_idx;
+    var b2_start = mid_idx + 1;
+    var b2_end = end;
+
+    if query[axis] >= mid_pos {
+      b2_start = begin;
+      b2_end = mid_idx;
+      b1_start = mid_idx + 1;
+      b1_end = end;
+    }
+    if b2_start != b2_end {
+      let diff = query[axis] - mid_pos;
+      if diff * diff < best_distance {
+        stack[len] = vec3u(b2_start, b2_end, (axis + 1) % 2);
+        len += 1;
       }
     }
-    else {
-      // internal node
-      let split = bitcast<f32>(kdtree[idx]);
-      let left = kdtree[idx + 1];
-      let right = kdtree[idx + 2];
-      let dist = pos[axis] - split;
-      if dist * dist < best_dist_sq {
-        // may need to check both subtrees
-        let pick = select(1u, 0u, pos[axis] < split);
-        let closer = select(right, left, pick == 0);
-        let farther = select(left, right, pick == 0);
-        // push farther first, then closer (so closer is processed first)
-        if farther != 0 {
-          stack[len] = vec2u(farther, (axis + 1) & 1);
-          len += 1;
-        }
-        if closer != 0 {
-          stack[len] = vec2u(closer, (axis + 1) & 1);
-          len += 1;
-        }
-      }
-      else {
-        // only check the subtree on the side of pos
-        let pick = select(1u, 0u, pos[axis] < split);
-        let child = kdtree[idx + pick + 1];
-        if child != 0 {
-          stack[len] = vec2u(child, (axis + 1) & 1);
-          len += 1;
-        }
-      }
+    if b1_start != b1_end {
+      stack[len] = vec3u(b1_start, b1_end, (axis + 1) % 2);
+      len += 1;
     }
   }
 
-  return vec3f(best_point, best_dist_sq);
+  return vec3f(nearest_item, best_distance);
 }
 
 /*fn get_nearest_point(pos: vec2f) -> vec3f {
@@ -810,7 +798,7 @@ fn tdf(input: VertexOutput) -> @location(0) vec4f {
   let inside = shape_boolF(pos);
 
   var col = draw_sdf(dist, inside);
-  {
+  /*{
     let m = (config.mouse - (config.dim * 0.5)) * vec2f(1.0, - 1.0) + config.pos;
     let q = traverse(m);
     let d = mag(pos - q);
@@ -818,7 +806,7 @@ fn tdf(input: VertexOutput) -> @location(0) vec4f {
     //col = vec4f(mix(col.rgb, vec3(1.0, 1.0, 0.0), 1.0 - smoothstep(0.0, 1.0, abs(length(pos - m) - (d / 2.0)))), col.a);
     col = vec4f(mix(col.rgb, vec3(1.0, 1.0, 0.0), 1.0 - smoothstep(0.0, 1.0, length(pos - m) - 5)), col.a);
     col = vec4f(mix(col.rgb, vec3(1.0, 1.0, 0.0), 1.0 - smoothstep(0.0, 1.0, length(pos - q) - 5)), col.a);
-  }
+  }*/
 
   return col;
 }
@@ -882,6 +870,16 @@ fn sdOrientedBox(p: vec2f, a: vec2f, b: vec2f, th: f32) -> f32 {
   return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0);
 }
 
+fn sdTriangleIsosceles(pp: vec2f, q: vec2f) -> f32 {
+  var p = pp;
+  p.x = abs(p.x);
+  let a = p - q * clamp(dot(p, q) / dot(q, q), 0.0, 1.0);
+  let b = p - q * vec2(clamp(p.x / q.x, 0.0, 1.0), 1.0);
+  let s = - sign(q.y);
+  let d = min(vec2(dot(a, a), s * (p.x * q.y - p.y * q.x)), vec2(dot(b, b), s * (p.y - q.y)));
+  return - sqrt(d.x) * sign(d.y);
+}
+
 // End standard SDFs
 
 // This simulates access patterns from a shader that picks between a few single SDF options by
@@ -900,6 +898,10 @@ fn fs_sdf(input: VertexOutput) -> @location(0) vec4f {
         d += min(sdOrientedBox(input.uv, vec2f(shapes[1], shapes[2]), vec2f(shapes[3], shapes[4]), shapes[5]), sdOrientedBox(input.uv, vec2f(shapes[3], shapes[2]), vec2f(shapes[1], shapes[4]), shapes[5]));
         i += 6;
 
+      }
+      case 7 : {
+        d += sdTriangleIsosceles(input.uv, vec2f(shapes[1], shapes[2]));
+        i += 3;
       }
       case SHAPE_BEZIER: {
         d += sdBezier(input.uv, vec2f(shapes[1], shapes[2]), vec2f(shapes[3], shapes[4]), vec2f(shapes[5], shapes[6]));
