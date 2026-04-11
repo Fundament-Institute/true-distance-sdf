@@ -512,28 +512,13 @@ impl KdTree {
     }
 }*/
 
-pub fn kd_nearest_by<'a, T, P: kd_tree::KdPoint>(
-    root: &'a [T],
-    query: &P,
-    get: impl Fn(&T, usize) -> P::Scalar + Copy,
-) -> &'a T {
-    fn distance_squared<P: kd_tree::KdPoint, T>(
-        p1: &P,
-        p2: &T,
-        get: impl Fn(&T, usize) -> P::Scalar,
-    ) -> P::Scalar {
-        let mut squared_distance = <P::Scalar as num_traits::Zero>::zero();
-        for i in 0..P::dim() {
-            let diff = p1.at(i) - get(p2, i);
-            squared_distance += diff * diff;
-        }
-        squared_distance
+pub fn kd_nearest_by<'a>(root: &'a [ComplexTag], query: Complex) -> Option<&'a ComplexTag> {
+    if root.is_empty() {
+        return None;
     }
-
-    assert!(!root.is_empty());
     let mut nearest_item = &root[0];
-    let mut best_distance = distance_squared(query, &root[0], get);
-    let mut stack: Vec<(&'a [T], usize)> = Vec::new();
+    let mut best_distance = (query - root[0].0).squaredMag();
+    let mut stack: Vec<(&'a [ComplexTag], usize)> = Vec::new();
 
     let mut counter = 0;
     stack.push((root, 0));
@@ -541,7 +526,7 @@ pub fn kd_nearest_by<'a, T, P: kd_tree::KdPoint>(
         counter += 1;
         let mid_idx = kdtree.len() / 2;
         let item = &kdtree[mid_idx];
-        let squared_distance = distance_squared(query, item, get);
+        let squared_distance = (query - item.0).squaredMag();
         if squared_distance < best_distance {
             nearest_item = item;
             best_distance = squared_distance;
@@ -550,25 +535,25 @@ pub fn kd_nearest_by<'a, T, P: kd_tree::KdPoint>(
                 continue;
             }
         }
-        let mid_pos = get(item, axis);
-        let [branch1, branch2] = if query.at(axis) < mid_pos {
+        let mid_pos = item.0[axis];
+        let [branch1, branch2] = if query[axis] < mid_pos {
             [&kdtree[..mid_idx], &kdtree[mid_idx + 1..]]
         } else {
             [&kdtree[mid_idx + 1..], &kdtree[..mid_idx]]
         };
         if !branch2.is_empty() {
-            let diff = query.at(axis) - mid_pos;
+            let diff = query[axis] - mid_pos;
             if diff * diff < best_distance {
-                stack.push((branch2, (axis + 1) % P::dim()));
+                stack.push((branch2, (axis + 1) % 2));
             }
         }
         if !branch1.is_empty() {
-            stack.push((branch1, (axis + 1) % P::dim()));
+            stack.push((branch1, (axis + 1) % 2));
         }
     }
 
     //panic!("STEPS: {counter}");
-    nearest_item
+    Some(nearest_item)
 }
 
 #[derive(Debug)]
@@ -1030,14 +1015,13 @@ impl Shape {
         kdtree: &PointTree,
         points: &[ComplexTag],
     ) {
-        //if let Some(near) = kdtree.nearest(&pos) {
-        //    *nearest = near.item.0;
-        //};
-        *nearest = kd_nearest_by(kdtree.items(), &pos, |item, k| item.0[k]).0;
+        if let Some(near) = kd_nearest_by(kdtree.items(), pos) {
+            *nearest = near.0;
+        };
 
         let check1 = *nearest;
 
-        for ComplexTag(p, _, _) in points {
+        /*for ComplexTag(p, _, _) in points {
             let dist = (*p - pos).squaredMag();
 
             // We can skip isBoundaryPoint here because the intersection points are prefiltered
@@ -1046,7 +1030,7 @@ impl Shape {
             }
         }
 
-        assert_eq!(check1, *nearest);
+        assert_eq!(check1, *nearest);*/
 
         match self {
             Self::Circle(circle, _, _) => {
@@ -1097,13 +1081,13 @@ impl Shape {
             marked.insert(*l as usize);
             marked.insert(*r as usize);
         });*/
-        //let within = kdtree.within_radius(&nearest, r2);
-        //for ComplexTag(pos, l, r) in within {
-        for ComplexTag(pos, l, r) in points {
+        let within = kdtree.within_radius(&nearest, r2);
+        for ComplexTag(pos, l, r) in within {
+            //for ComplexTag(pos, l, r) in points {
             let dist_sq = (*pos - nearest).squaredMag();
             if dist_sq <= r2 {
-                marked.insert(*l);
-                marked.insert(*r);
+                marked.insert(*l as usize);
+                marked.insert(*r as usize);
             }
         }
 
@@ -1361,6 +1345,8 @@ struct App {
     quad_v: Vec<u32>,
 }
 
+pub static STATS_COUNT: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_some() {
@@ -1427,6 +1413,7 @@ impl ApplicationHandler for App {
             label: Some("Shapes"),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             contents: self.flatten.as_bytes(),
+            //contents: [f32::from_bits(7), 200.0, 200.0].as_bytes(),
             //contents: [f32::from_bits(0), 200.0, 100.0, 0.0, 20.0, 40.0, 60.0].as_bytes(),
             /*contents: [
                 f32::from_bits(1),
@@ -1449,10 +1436,16 @@ impl ApplicationHandler for App {
             contents: blank_points.as_bytes(),
         });
 
+        assert_eq!(size_of::<ComplexTag>(), size_of::<f32>() * 4);
+        let empty_kdtree = vec![f32::MAX, f32::MAX, 0.0, 0.0];
         let kdtree = driver.device.create_buffer_init(&BufferInitDescriptor {
             label: Some("KDTree"),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
-            contents: self.kdtree.as_bytes(),
+            contents: if self.kdtree.is_empty() {
+                empty_kdtree.as_bytes()
+            } else {
+                self.kdtree.items().as_bytes()
+            },
         });
 
         let atomic_offset = driver.device.create_buffer_init(&BufferInitDescriptor {
@@ -1658,8 +1651,10 @@ impl ApplicationHandler for App {
                     * state.driver.queue.get_timestamp_period())
                     / 1000000.0;
 
-                self.draw_stats.update(diffms);
-                self.compute_stats.update(computediff);
+                if (STATS_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) > 100) {
+                    self.draw_stats.update(diffms);
+                    self.compute_stats.update(computediff);
+                }
 
                 let name = env!("CARGO_CRATE_NAME");
                 window.set_title(
@@ -1768,13 +1763,13 @@ impl From<&Shape> for sdf::Bezier2o2d {
 }
 
 #[derive(Clone, IntoBytes, zerocopy::Immutable)]
-pub struct ComplexTag(Complex, usize, usize);
+pub struct ComplexTag(Complex, u32, u32);
 
 enum PointIter {
     Zero,
-    One(core::array::IntoIter<Complex, 1>, (usize, usize)),
-    Two(core::array::IntoIter<Complex, 2>, (usize, usize)),
-    Four(core::array::IntoIter<Complex, 4>, (usize, usize)),
+    One(core::array::IntoIter<Complex, 1>, (u32, u32)),
+    Two(core::array::IntoIter<Complex, 2>, (u32, u32)),
+    Four(core::array::IntoIter<Complex, 4>, (u32, u32)),
 }
 
 impl Iterator for PointIter {
@@ -1797,31 +1792,39 @@ pub fn implied_points<'a>(
         .clone()
         .tuple_combinations()
         .map(|(l, r)| match (l, r) {
-            (Shape::Circle(c1, _, i), Shape::Circle(c2, _, j)) => {
-                PointIter::Two(sdf::twoCirclesIntersect(*c1, *c2).into_iter(), (*i, *j))
-            }
+            (Shape::Circle(c1, _, i), Shape::Circle(c2, _, j)) => PointIter::Two(
+                sdf::twoCirclesIntersect(*c1, *c2).into_iter(),
+                (*i as u32, *j as u32),
+            ),
             (Shape::HalfPlane(hp, _, i), Shape::Circle(c, _, j))
-            | (Shape::Circle(c, _, i), Shape::HalfPlane(hp, _, j)) => {
-                PointIter::Two(sdf::circleLineIntersect(*c, *hp).into_iter(), (*i, *j))
-            }
-            (Shape::HalfPlane(hp1, _, i), Shape::HalfPlane(hp2, _, j)) => {
-                PointIter::One([sdf::twoLinesIntersect(*hp1, *hp2)].into_iter(), (*i, *j))
-            }
+            | (Shape::Circle(c, _, i), Shape::HalfPlane(hp, _, j)) => PointIter::Two(
+                sdf::circleLineIntersect(*c, *hp).into_iter(),
+                (*i as u32, *j as u32),
+            ),
+            (Shape::HalfPlane(hp1, _, i), Shape::HalfPlane(hp2, _, j)) => PointIter::One(
+                [sdf::twoLinesIntersect(*hp1, *hp2)].into_iter(),
+                (*i as u32, *j as u32),
+            ),
             (Shape::Bezier(b, _, i), Shape::Circle(c, _, j))
-            | (Shape::Circle(c, _, i), Shape::Bezier(b, _, j)) => {
-                PointIter::Four(b.bezier2o2dCircleIntersect(*c).into_iter(), (*i, *j))
-            }
+            | (Shape::Circle(c, _, i), Shape::Bezier(b, _, j)) => PointIter::Four(
+                b.bezier2o2dCircleIntersect(*c).into_iter(),
+                (*i as u32, *j as u32),
+            ),
             (Shape::Bezier(b, _, i), Shape::HalfPlane(hp, _, j))
-            | (Shape::HalfPlane(hp, _, i), Shape::Bezier(b, _, j)) => {
-                PointIter::Two(b.bezier2o2dLineIntersect(*hp).into_iter(), (*i, *j))
-            }
-            (Shape::Bezier(b1, _, i), Shape::Bezier(b2, _, j)) => {
-                PointIter::Four(b1.twoBezier2o2dsIntersect(*b2).into_iter(), (*i, *j))
-            }
+            | (Shape::HalfPlane(hp, _, i), Shape::Bezier(b, _, j)) => PointIter::Two(
+                b.bezier2o2dLineIntersect(*hp).into_iter(),
+                (*i as u32, *j as u32),
+            ),
+            (Shape::Bezier(b1, _, i), Shape::Bezier(b2, _, j)) => PointIter::Four(
+                b1.twoBezier2o2dsIntersect(*b2).into_iter(),
+                (*i as u32, *j as u32),
+            ),
             _ => panic!("Composite in shape iter!"),
         })
         .chain(shapes.map(|x| match x {
-            Shape::Bezier(b, _, i) => PointIter::Two([b.0, b.2].into_iter(), (*i, *i)),
+            Shape::Bezier(b, _, i) => {
+                PointIter::Two([b.0, b.2].into_iter(), (*i as u32, *i as u32))
+            }
             _ => PointIter::Zero,
         }))
         .flatten()
@@ -1963,25 +1966,6 @@ pub fn build_quadtree(
         idx
     } else {
         v.push(0);
-        /*
-        if DEBUG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 106 {
-            if let Shape::Composite(f, _) = &mut trimmed {
-                if let Shape::Composite(ff, _) = &mut f.l {
-                    if let Shape::Constant(t, _) = &mut ff.r {
-                        // println!("catch: {}", *t);
-                        // *t = -*t;
-                    }
-                }
-                let check = sdf.trim_shape(
-                    sdf::Complex::new(centroid.x, centroid.y),
-                    nearest,
-                    Complex::new(area.width(), area.height()).mag(),
-                    points,
-                );
-            }
-            let count = trimmed.to_indirect_array(v);
-            v[idx as usize] = count;
-        } else { */
         if let Some(v) = hmap.get(&trimmed) {
             let c = DEBUG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             v | QUAD_CHILD
@@ -1989,7 +1973,7 @@ pub fn build_quadtree(
             let count = trimmed.to_indirect_array(v);
             v[idx as usize] = count;
 
-            if hmap.len() % 500 == 0 {
+            if hmap.len() % 1000 == 0 {
                 println!("total: {}", hmap.len());
                 println!("sample: {:?}", &v[idx as usize..(idx + count) as usize]);
             }
@@ -1997,7 +1981,6 @@ pub fn build_quadtree(
             hmap.insert(trimmed, idx);
             idx | QUAD_CHILD
         }
-        //}
     }
 }
 
@@ -2091,20 +2074,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let c2 = Shape::circle((180.0, 0.0), 240.0);
     let c3 = Shape::circle((0.0, -180.0), 240.0);
     let b1 = Shape::bezier([(0.0, 320.0), (0.0, -640.0), (120.0, 320.0)]);
-    let b2 = Shape::bezier([(320.0, 0.0), (-640.0, 0.0), (320.0, 120.0)]);
+    let b2 = Shape::bezier([(320.0, -120.0), (-640.0, 0.0), (320.0, 120.0)]);
 
     //u (i (n (u (n (hp exampleHalfPlanes[0])) (hp exampleHalfPlanes[1]))) (i (n (disk exampleDisks[0])) (disk exampleDisks[1]))) (bez exampleBezier2o2ds[0])
     //let mut composite = ((-((-hp1) | hp2)) & ((-c1) & c2)) | (b1 | b2);
 
     let mut rng = Xoshiro128PlusPlus::from_seed(2873493u128.to_le_bytes());
-    let mut composite = gen_composite_shape(100, 50.0, Complex::new(200.0, 0.0), &mut rng);
+    //let mut composite = gen_composite_shape(80, 50.0, Complex::new(200.0, 0.0), &mut rng);
     //let mut composite = ((-((-hp1) | hp2)) | (c2));
     //let mut composite = ((hp1) & -hp2) | (c2);
+    //let mut composite = Shape::circle((0.0, 0.0), 240.0);
+    /*let mut composite = -Shape::halfplane((0.0, 1.0), 200.0)
+    | Shape::halfplane((1.0, 1.0), 0.0)
+    | Shape::halfplane((-1.0, 1.0), 0.0);*/
+    let mut composite = b2;
 
-    //let mut composite = gen_grid_shape(10, 10, 20.0, Complex::new(-200.0, -200.0));
+    //let mut composite = gen_grid_shape(7, 7, 20.0, Complex::new(-200.0, -200.0));
     let box1 = Shape::halfplane((30.0 - (-30.0), (-200.0) - 200.0), 0.5);
     let box2 = Shape::halfplane((30.0 - (-30.0), 200.0 - (-200.0)), -0.5);
-    //let mut composite = box1 | box2;
+    //let mut composite = (box1 | box2) & ((-((-hp1) | hp2)) | (c2));
+
     //let shapes = Vec::from_iter(composite.iter());
     //println!("shapes: {shapes:?}");
     composite = composite.demorgan(false);
