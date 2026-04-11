@@ -30,6 +30,7 @@ use winit::platform::windows::EventLoopBuilderExtWindows;
 // variable is the same on both
 #[cfg(target_os = "linux")]
 use winit::platform::x11::EventLoopBuilderExtX11;
+use zerocopy::IntoBytes;
 
 use crate::sdf::{Circle, Complex};
 
@@ -344,7 +345,7 @@ impl Driver {
     }
 }
 
-pub struct KdTree {
+/*pub struct KdTree {
     values: Vec<u32>,
 }
 
@@ -359,7 +360,7 @@ impl KdTree {
         }
         let mut values: Vec<u32> = Vec::new();
 
-        Self::construct(Vec::from(points), 0, &mut values);
+        Self::construct(Vec::from(points), 0, &mut values, 0);
         KdTree { values }
     }
 
@@ -371,7 +372,12 @@ impl KdTree {
         values.push(pt.1.1 as u32);
     }
 
-    fn construct(mut chunk: Vec<(Complex, (usize, usize))>, axis: usize, values: &mut Vec<u32>) {
+    fn construct(
+        mut chunk: Vec<(Complex, (usize, usize))>,
+        axis: usize,
+        values: &mut Vec<u32>,
+        depth: u32,
+    ) {
         const EPSILON: f32 = 1e-5;
         chunk.sort_by(|(l, _), (r, _)| l[axis].partial_cmp(&r[axis]).unwrap());
 
@@ -399,9 +405,10 @@ impl KdTree {
             //If it's 1 point or the end point is less than EPSILON distance from our start point, this is a child.
             values[l_idx] = values.len() as u32 | KD_CHILD;
             Self::emit_child(chunk[0], values);
+            //println!("depth reached: {depth}");
         } else {
             values[l_idx] = values.len() as u32;
-            Self::construct(chunk, (axis + 1) & 1, values);
+            Self::construct(chunk, (axis + 1) & 1, values, depth + 1);
         }
 
         // Right child is empty
@@ -410,9 +417,10 @@ impl KdTree {
         } else if right.len() == 1 {
             values[r_idx] = values.len() as u32 | KD_CHILD;
             Self::emit_child(right[0], values);
+            //println!("depth reached: {depth}");
         } else {
             values[r_idx] = values.len() as u32;
-            Self::construct(right, (axis + 1) & 1, values);
+            Self::construct(right, (axis + 1) & 1, values, depth + 1);
         }
     }
 
@@ -424,7 +432,9 @@ impl KdTree {
 
         const ESIZE: usize = 4;
 
-        while let Some((idx, axis)) = stack.pop() {
+        let mut counter = 0;
+        while let Some((idx, axis, lrtb)) = stack.pop() {
+            counter += 1;
             if (idx & KD_CHILD) != 0 {
                 // leaf node
                 let idx = (idx & (!KD_CHILD)) as usize;
@@ -447,32 +457,39 @@ impl KdTree {
                 // internal node
                 let idx = idx as usize;
                 let split = f32::from_bits(self.values[idx]);
-                let left = self.values[idx + 1];
-                let right = self.values[idx + 2];
                 let dist = pos[axis] - split;
                 if dist * dist < best_dist_sq {
+                    let mut left_region = lrtb;
+                    let mut right_region = lrtb;
+                    left_region[axis] = split;
+                    right_region[axis + 2] = split;
+                    let left = (self.values[idx + 1], left_region);
+                    let right = (self.values[idx + 2], right_region);
                     // may need to check both subtrees
                     let pick = if pos[axis] < split { 0 } else { 1 };
                     let closer = if pick == 0 { left } else { right };
                     let farther = if pick == 0 { right } else { left };
                     // push farther first, then closer (so closer is processed first)
-                    if farther != 0 {
-                        stack.push((farther, (axis + 1) & 1));
+                    if farther.0 != 0 {
+                        stack.push((farther.0, (axis + 1) & 1, farther.1));
                     }
-                    if closer != 0 {
-                        stack.push((closer, (axis + 1) & 1));
+                    if closer.0 != 0 {
+                        stack.push((closer.0, (axis + 1) & 1, farther.1));
                     }
                 } else {
                     // only check the subtree on the side of pos
                     let pick = if pos[axis] < split { 0 } else { 1 };
                     let child = self.values[idx + pick + 1];
+                    let mut region = lrtb;
+                    region[axis + pick * 2] = split;
                     if child != 0 {
-                        stack.push((child, (axis + 1) & 1));
+                        stack.push((child, (axis + 1) & 1, region));
                     }
                 }
             }
         }
 
+        panic!("found in {counter}");
         best_point
     }
 
@@ -493,6 +510,65 @@ impl KdTree {
         f: &mut impl FnMut(&(Complex, (u32, u32))),
     ) {
     }
+}*/
+
+pub fn kd_nearest_by<'a, T, P: kd_tree::KdPoint>(
+    root: &'a [T],
+    query: &P,
+    get: impl Fn(&T, usize) -> P::Scalar + Copy,
+) -> &'a T {
+    fn distance_squared<P: kd_tree::KdPoint, T>(
+        p1: &P,
+        p2: &T,
+        get: impl Fn(&T, usize) -> P::Scalar,
+    ) -> P::Scalar {
+        let mut squared_distance = <P::Scalar as num_traits::Zero>::zero();
+        for i in 0..P::dim() {
+            let diff = p1.at(i) - get(p2, i);
+            squared_distance += diff * diff;
+        }
+        squared_distance
+    }
+
+    assert!(!root.is_empty());
+    let mut nearest_item = &root[0];
+    let mut best_distance = distance_squared(query, &root[0], get);
+    let mut stack: Vec<(&'a [T], usize)> = Vec::new();
+
+    let mut counter = 0;
+    stack.push((root, 0));
+    while let Some((kdtree, axis)) = stack.pop() {
+        counter += 1;
+        let mid_idx = kdtree.len() / 2;
+        let item = &kdtree[mid_idx];
+        let squared_distance = distance_squared(query, item, get);
+        if squared_distance < best_distance {
+            nearest_item = item;
+            best_distance = squared_distance;
+            use num_traits::Zero;
+            if best_distance.is_zero() {
+                continue;
+            }
+        }
+        let mid_pos = get(item, axis);
+        let [branch1, branch2] = if query.at(axis) < mid_pos {
+            [&kdtree[..mid_idx], &kdtree[mid_idx + 1..]]
+        } else {
+            [&kdtree[mid_idx + 1..], &kdtree[..mid_idx]]
+        };
+        if !branch2.is_empty() {
+            let diff = query.at(axis) - mid_pos;
+            if diff * diff < best_distance {
+                stack.push((branch2, (axis + 1) % P::dim()));
+            }
+        }
+        if !branch1.is_empty() {
+            stack.push((branch1, (axis + 1) % P::dim()));
+        }
+    }
+
+    //panic!("STEPS: {counter}");
+    nearest_item
 }
 
 #[derive(Debug)]
@@ -952,15 +1028,16 @@ impl Shape {
         pos: Complex,
         nearest: &mut Complex,
         kdtree: &PointTree,
-        points: &[(sdf::Complex, (usize, usize))],
+        points: &[ComplexTag],
     ) {
-        if let Some(near) = kdtree.nearest_point(pos) {
-            *nearest = near;
-        }
+        //if let Some(near) = kdtree.nearest(&pos) {
+        //    *nearest = near.item.0;
+        //};
+        *nearest = kd_nearest_by(kdtree.items(), &pos, |item, k| item.0[k]).0;
 
         let check1 = *nearest;
 
-        /*for (p, _) in points {
+        for ComplexTag(p, _, _) in points {
             let dist = (*p - pos).squaredMag();
 
             // We can skip isBoundaryPoint here because the intersection points are prefiltered
@@ -969,7 +1046,7 @@ impl Shape {
             }
         }
 
-        assert_eq!(check1, *nearest);*/
+        assert_eq!(check1, *nearest);
 
         match self {
             Self::Circle(circle, _, _) => {
@@ -1011,7 +1088,7 @@ impl Shape {
         nearest: sdf::Complex,
         diagonal: f32,
         kdtree: &PointTree,
-        points: &[(sdf::Complex, (usize, usize))],
+        points: &[ComplexTag],
     ) -> Self {
         let mut marked: HashSet<usize> = HashSet::new();
         let r2 = diagonal * diagonal;
@@ -1020,7 +1097,9 @@ impl Shape {
             marked.insert(*l as usize);
             marked.insert(*r as usize);
         });*/
-        for (pos, (l, r)) in points {
+        //let within = kdtree.within_radius(&nearest, r2);
+        //for ComplexTag(pos, l, r) in within {
+        for ComplexTag(pos, l, r) in points {
             let dist_sq = (*pos - nearest).squaredMag();
             if dist_sq <= r2 {
                 marked.insert(*l);
@@ -1264,13 +1343,13 @@ pub fn get_indices(shapes: &[f32]) -> (Vec<u32>, u32) {
     (v, max_points(beziers, circles, lines))
 }
 
-type PointTree = KdTree;
+type PointTree = kd_tree::KdTree<ComplexTag>;
 
 struct App {
     state: Option<AppState>,
     composite: Shape,
     flatten: Vec<f32>,
-    points: Vec<(Complex, (usize, usize))>,
+    points: Vec<ComplexTag>,
     kdtree: PointTree,
     offset: [f32; 2],
     mousepos: [f32; 2],
@@ -1373,7 +1452,7 @@ impl ApplicationHandler for App {
         let kdtree = driver.device.create_buffer_init(&BufferInitDescriptor {
             label: Some("KDTree"),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
-            contents: self.kdtree.values.as_bytes(),
+            contents: self.kdtree.as_bytes(),
         });
 
         let atomic_offset = driver.device.create_buffer_init(&BufferInitDescriptor {
@@ -1688,6 +1767,9 @@ impl From<&Shape> for sdf::Bezier2o2d {
     }
 }
 
+#[derive(Clone, IntoBytes, zerocopy::Immutable)]
+pub struct ComplexTag(Complex, usize, usize);
+
 enum PointIter {
     Zero,
     One(core::array::IntoIter<Complex, 1>, (usize, usize)),
@@ -1696,20 +1778,20 @@ enum PointIter {
 }
 
 impl Iterator for PointIter {
-    type Item = (Complex, (usize, usize));
+    type Item = ComplexTag;
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             PointIter::Zero => None,
-            PointIter::One(i, pair) => i.next().map(|x| (x, *pair)),
-            PointIter::Two(i, pair) => i.next().map(|x| (x, *pair)),
-            PointIter::Four(i, pair) => i.next().map(|x| (x, *pair)),
+            PointIter::One(i, pair) => i.next().map(|x| ComplexTag(x, pair.0, pair.1)),
+            PointIter::Two(i, pair) => i.next().map(|x| ComplexTag(x, pair.0, pair.1)),
+            PointIter::Four(i, pair) => i.next().map(|x| ComplexTag(x, pair.0, pair.1)),
         }
     }
 }
 
 pub fn implied_points<'a>(
     shapes: impl Iterator<Item = &'a Shape> + Clone,
-) -> impl Iterator<Item = (Complex, (usize, usize))> {
+) -> impl Iterator<Item = ComplexTag> {
     use itertools::Itertools;
     shapes
         .clone()
@@ -1829,7 +1911,7 @@ pub fn build_quadtree(
     v: &mut Vec<u32>,
     sdf: &Shape,
     kdtree: &PointTree,
-    points: &[(sdf::Complex, (usize, usize))],
+    points: &[ComplexTag],
     hmap: &mut HashMap<Shape, u32>,
 ) -> u32 {
     use euclid::default::Box2D;
@@ -1907,7 +1989,7 @@ pub fn build_quadtree(
             let count = trimmed.to_indirect_array(v);
             v[idx as usize] = count;
 
-            if hmap.len() % 100 == 0 {
+            if hmap.len() % 500 == 0 {
                 println!("total: {}", hmap.len());
                 println!("sample: {:?}", &v[idx as usize..(idx + count) as usize]);
             }
@@ -1979,6 +2061,26 @@ fn gen_grid_shape(w: usize, h: usize, radius: f32, offset: Complex) -> Shape {
     }
     composite
 }
+
+impl kd_tree::KdPoint for Complex {
+    type Scalar = f32;
+
+    type Dim = typenum::U2;
+
+    fn at(&self, i: usize) -> Self::Scalar {
+        self[i]
+    }
+}
+
+impl kd_tree::KdPoint for ComplexTag {
+    type Scalar = f32;
+
+    type Dim = typenum::U2;
+
+    fn at(&self, i: usize) -> Self::Scalar {
+        self.0[i]
+    }
+}
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_family = "wasm")]
     console_error_panic_hook::set_once();
@@ -1995,7 +2097,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //let mut composite = ((-((-hp1) | hp2)) & ((-c1) & c2)) | (b1 | b2);
 
     let mut rng = Xoshiro128PlusPlus::from_seed(2873493u128.to_le_bytes());
-    let mut composite = gen_composite_shape(50, 50.0, Complex::new(200.0, 0.0), &mut rng);
+    let mut composite = gen_composite_shape(100, 50.0, Complex::new(200.0, 0.0), &mut rng);
     //let mut composite = ((-((-hp1) | hp2)) | (c2));
     //let mut composite = ((hp1) & -hp2) | (c2);
 
@@ -2008,10 +2110,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     composite = composite.demorgan(false);
     let flatten = composite.to_array();
     let points = Vec::from_iter(
-        implied_points(composite.iter()).filter(|(x, _)| is_boundary_point(&composite, *x)),
+        implied_points(composite.iter()).filter(|x| is_boundary_point(&composite, x.0)),
     );
 
-    let kdtree: PointTree = KdTree::new(&points);
+    //let kdtree: PointTree = KdTree::new(&points);
+    let kdtree: PointTree = kd_tree::KdTree::build_by_ordered_float(points.clone());
 
     //println!("points: {points:?}");
     let event_loop = new_app(true)?;

@@ -38,7 +38,7 @@ var<storage, read> quadtree: array<u32>;
 const KD_CHILD: u32 = (1u << 31u);
 const KD_ESIZE: u32 = 4;
 
-fn get_nearest_point(input: vec2f) -> vec2f {
+fn get_nearest_point(input: vec2f) -> vec3f {
   let pos = array(input.x, input.y);
   var stack = array<vec2<u32>, 64>();
   var best_point = vec2f(MAX_F32, MAX_F32);
@@ -100,10 +100,10 @@ fn get_nearest_point(input: vec2f) -> vec2f {
     }
   }
 
-  return best_point;
+  return vec3f(best_point, best_dist_sq);
 }
 
-/*fn get_nearest_point(pos: vec2f) -> vec2f {
+/*fn get_nearest_point(pos: vec2f) -> vec3f {
   var nearest = vec2f(MAX_F32, MAX_F32);
   var lastdist_sq = MAX_F32;
   for (var i = 0u; i < arrayLength(&points); i++) {
@@ -120,7 +120,7 @@ fn get_nearest_point(input: vec2f) -> vec2f {
     }
   }
 
-  return nearest;
+  return vec3f(nearest, lastdist_sq);
 }*/
 
 struct Config {
@@ -492,8 +492,9 @@ fn isBoundaryPoint(pos: vec2f) -> bool {
 }
 
 fn shapefunc(pos: vec2f) -> vec2f {
-  var nearest = get_nearest_point(pos);
-  var lastdist_sq = mag_sq(nearest - pos);
+  var nlast = get_nearest_point(pos);
+  var nearest = nlast.xy;
+  var lastdist_sq = nlast.z;
 
   var p = vec2f(MAX_F32, MAX_F32);
 
@@ -600,8 +601,9 @@ fn indirect_isBoundaryPoint(pos: vec2f, start: u32) -> bool {
 fn indirect_shapefunc(pos: vec2f, start: u32) -> vec2f {
   let end = start + 1 + quadtree[start];
 
-  var nearest = get_nearest_point(pos);
-  var lastdist_sq = mag_sq(nearest - pos);
+  var nlast = get_nearest_point(pos);
+  var nearest = nlast.xy;
+  var lastdist_sq = nlast.z;
 
   var p = vec2f(MAX_F32, MAX_F32);
 
