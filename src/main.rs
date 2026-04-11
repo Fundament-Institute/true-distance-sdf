@@ -2,12 +2,9 @@
 
 use core::f32;
 use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
 use std::num::NonZero;
 use std::sync::Arc;
-use std::thread::Thread;
 
-use euclid::default::Vector2D;
 use rand::rngs::Xoshiro128PlusPlus;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use winit::application::ApplicationHandler;
@@ -344,6 +341,183 @@ impl Driver {
             });
 
         (pipeline, bind_group_layout)
+    }
+}
+
+pub struct KdTree {
+    values: Vec<u32>,
+}
+
+pub const KD_CHILD: u32 = 1 << 31;
+
+impl KdTree {
+    pub fn new(points: &[(Complex, (usize, usize))]) -> Self {
+        let mut xsort: Vec<_> = Vec::from(points);
+        let mut ysort: Vec<_> = xsort.clone();
+
+        xsort.sort_unstable_by(|(l, _), (r, _)| l.x.partial_cmp(&r.x).unwrap());
+        ysort.sort_unstable_by(|(l, _), (r, _)| l.y.partial_cmp(&r.y).unwrap());
+
+        let mut values: Vec<u32> = Vec::new();
+
+        Self::construct(
+            [&xsort, &ysort],
+            0,
+            [0, xsort.len(), 0, ysort.len()],
+            &mut values,
+        );
+        KdTree { values }
+    }
+
+    fn emit_child(
+        xysort: [&[(Complex, (usize, usize))]; 2],
+        start: usize,
+        end: usize,
+        axis: usize,
+        values: &mut Vec<u32>,
+    ) {
+        values.push((end - start) as u32);
+        for i in start..end {
+            let pt = xysort[axis][i];
+            values.push(pt.0.x.to_bits());
+            values.push(pt.0.y.to_bits());
+            values.push(pt.1.0 as u32);
+            values.push(pt.1.1 as u32);
+        }
+    }
+
+    fn construct(
+        xysort: [&[(Complex, (usize, usize))]; 2],
+        axis: usize,
+        ranges: [usize; 4],
+        values: &mut Vec<u32>,
+    ) {
+        const EPSILON: f32 = 1e-5;
+
+        // Take this axis range
+        let start = ranges[axis * 2];
+        let end = ranges[(axis * 2) + 1];
+        if start == end {
+            return;
+        }
+
+        // Split the range at the median
+        let mut middle = (start + end) / 2;
+        let median = xysort[axis][middle].0[axis];
+
+        // walk backwards as long as the point is still equal to our median
+        while middle > start && xysort[axis][middle - 1].0[axis] == median {
+            middle -= 1;
+        }
+
+        values.push(median.to_bits());
+        let l_idx = values.len();
+        values.push(0);
+        let r_idx = values.len();
+        values.push(0);
+        // Left child is empty
+        if start == middle {
+            // do nothing
+        } else if middle - start == 1
+            || (xysort[axis][start].0 - xysort[axis][middle - 1].0).squaredMag() < EPSILON
+        {
+            //If it's 1 point or the end point is less than EPSILON distance from our start point, this is a child.
+            values[l_idx] = values.len() as u32;
+            Self::emit_child(xysort, start, middle, axis, values);
+        } else {
+            values[l_idx] = values.len() as u32;
+            let mut nranges = ranges.clone();
+            nranges[axis * 2] = start;
+            nranges[(axis * 2) + 1] = middle;
+            Self::construct(xysort, (axis + 1) & 1, nranges, values)
+        }
+
+        // Right child is empty
+        if middle == end {
+            // do nothing
+        } else if end - middle == 1
+            || (xysort[axis][middle].0 - xysort[axis][end - 1].0).squaredMag() < EPSILON
+        {
+            values[r_idx] = values.len() as u32;
+            Self::emit_child(xysort, middle, end, axis, values);
+        } else {
+            values[r_idx] = values.len() as u32;
+            let mut nranges = ranges.clone();
+            nranges[axis * 2] = middle;
+            nranges[(axis * 2) + 1] = end;
+            Self::construct(xysort, (axis + 1) & 1, nranges, values)
+        }
+    }
+
+    fn nearest_point(&self, pos: Complex) -> Option<Complex> {
+        let mut idx = 0;
+        let mut axis = 0;
+
+        loop {
+            let split = f32::from_bits(self.values[idx]);
+            let pick = if pos[axis] < split { 0 } else { 1 };
+            let mut child = self.values[idx + pick + 1];
+            if child == 0 {
+                child = self.values[idx + ((pick + 1) & 1) + 1];
+            }
+
+            if child == 0 {
+                break;
+            }
+
+            if (child & KD_CHILD) != 0 {
+                idx = (child & (!KD_CHILD)) as usize;
+                let count = self.values[idx];
+                if count == 0 {
+                    return None;
+                }
+                let mut nearest = Complex::new(f32::MAX, f32::MAX);
+                let mut lastdist_sq = f32::MAX;
+                // size of each point element, which might be larger than (f32, f32) if auxilliary information exists
+                const ESIZE: usize = 4;
+
+                for i in 0..count as usize {
+                    let point = Complex::new(
+                        f32::from_bits(self.values[idx + 1 + (i * ESIZE)]),
+                        f32::from_bits(self.values[idx + 1 + (i * ESIZE) + 1]),
+                    );
+
+                    let dist = (point - pos).squaredMag();
+
+                    // We can skip isBoundaryPoint here because the intersection points are prefiltered
+                    if dist < lastdist_sq {
+                        lastdist_sq = dist;
+                        nearest = point;
+                    }
+                }
+
+                return Some(nearest);
+            }
+
+            idx = child as usize;
+
+            axis = (axis + 1) & 1;
+        }
+
+        None
+    }
+
+    pub fn nearest_circle(
+        &self,
+        pos: Complex,
+        radius: f32,
+        mut f: impl FnMut(&(Complex, (u32, u32))),
+    ) {
+        self.nearest_circle_inner(0, pos, radius, &mut f);
+    }
+
+    fn nearest_circle_inner(
+        &self,
+        child: usize,
+        pos: Complex,
+        radius: f32,
+        f: &mut impl FnMut(&(Complex, (u32, u32))),
+    ) {
     }
 }
 
@@ -798,20 +972,9 @@ impl Shape {
         }
     }
 
-    pub fn nbp(
-        &self,
-        root: &Shape,
-        pos: Complex,
-        nearest: &mut Complex,
-        points: &[(sdf::Complex, (usize, usize))],
-    ) {
-        for (p, _) in points {
-            let dist = (*p - pos).squaredMag();
-
-            // We can skip isBoundaryPoint here because the intersection points are prefiltered
-            if dist < (*nearest - pos).squaredMag() {
-                *nearest = *p;
-            }
+    pub fn nbp(&self, root: &Shape, pos: Complex, nearest: &mut Complex, points: &PointTree) {
+        if let Some(near) = points.nearest_point(pos) {
+            *nearest = near;
         }
 
         match self {
@@ -853,18 +1016,15 @@ impl Shape {
         centroid: sdf::Complex,
         nearest: sdf::Complex,
         diagonal: f32,
-        points: &[(sdf::Complex, (usize, usize))],
+        points: &PointTree,
     ) -> Self {
         let mut marked: HashSet<usize> = HashSet::new();
         let r2 = diagonal * diagonal;
 
-        for (pos, (l, r)) in points {
-            let dist_sq = (*pos - nearest).squaredMag();
-            if dist_sq <= r2 {
-                marked.insert(*l);
-                marked.insert(*r);
-            }
-        }
+        points.nearest_circle(nearest, diagonal, |(_, (l, r))| {
+            marked.insert(*l as usize);
+            marked.insert(*r as usize);
+        });
 
         let r = diagonal + (centroid - nearest).mag();
 
@@ -1097,11 +1257,14 @@ pub fn get_indices(shapes: &[f32]) -> (Vec<u32>, u32) {
     (v, max_points(beziers, circles, lines))
 }
 
+type PointTree = KdTree;
+
 struct App {
     state: Option<AppState>,
     composite: Shape,
     flatten: Vec<f32>,
     points: Vec<(Complex, (usize, usize))>,
+    kdtree: PointTree,
     offset: [f32; 2],
     mousepos: [f32; 2],
     lastpos: PhysicalPosition<f64>,
@@ -1220,7 +1383,7 @@ impl ApplicationHandler for App {
             ),
             &mut self.quad_v,
             &self.composite,
-            &self.points,
+            &self.kdtree,
             &mut hmap,
         );
         let diff = std::time::Instant::now() - timer;
@@ -1357,7 +1520,7 @@ impl ApplicationHandler for App {
                         ),
                         &mut self.quad_v,
                         &self.composite,
-                        &self.points,
+                        &self.kdtree,
                         &mut hmap,
                     );
                     let diff = std::time::Instant::now() - timer;
@@ -1649,7 +1812,7 @@ pub fn build_quadtree(
     area: euclid::default::Box2D<f32>,
     v: &mut Vec<u32>,
     sdf: &Shape,
-    points: &[(sdf::Complex, (usize, usize))],
+    points: &PointTree,
     hmap: &mut HashMap<Shape, u32>,
 ) -> u32 {
     use euclid::default::Box2D;
@@ -1814,7 +1977,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //let mut composite = ((-((-hp1) | hp2)) & ((-c1) & c2)) | (b1 | b2);
 
     let mut rng = Xoshiro128PlusPlus::from_seed(2873493u128.to_le_bytes());
-    let mut composite = gen_composite_shape(600, 50.0, Complex::new(200.0, 0.0), &mut rng);
+    let mut composite = gen_composite_shape(10, 50.0, Complex::new(200.0, 0.0), &mut rng);
     //let mut composite = ((-((-hp1) | hp2)) | (c2));
     //let mut composite = ((hp1) & -hp2) | (c2);
 
@@ -1830,6 +1993,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         implied_points(composite.iter()).filter(|(x, _)| is_boundary_point(&composite, *x)),
     );
 
+    let kdtree: PointTree = KdTree::new(&points);
+
     //println!("points: {points:?}");
     let event_loop = new_app(true)?;
     let mut app = App {
@@ -1837,6 +2002,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         flatten,
         composite,
         points,
+        kdtree,
         lastpos: PhysicalPosition { x: 0.0, y: 0.0 },
         offset: [0.0, 0.0],
         mousepos: [0.0, 0.0],
