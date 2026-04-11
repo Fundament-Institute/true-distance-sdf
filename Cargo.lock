@@ -796,6 +796,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kd-tree"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e2adf615b2b7a38d0ec8a89b4f3c22e9e2820b1cc1c48c70e848fc83a8fb661"
+dependencies = [
+ "num-traits",
+ "ordered-float",
+ "paste",
+ "typenum",
+]
+
+[[package]]
 name = "khronos-egl"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1315,6 +1327,12 @@ name = "partial_application"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f926567968c32d22274b8eb721210363e54dcd8d2c960dd8533aa3be78143081"
+
+[[package]]
+name = "paste"
+version = "1.0.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "percent-encoding"
@@ -1885,10 +1903,12 @@ dependencies = [
  "eyre",
  "futures-lite",
  "itertools",
+ "kd-tree",
  "num-traits",
  "partial_application",
  "rand",
  "rolling-stats",
+ "typenum",
  "wgpu",
  "winit",
  "zerocopy",
@@ -1899,6 +1919,12 @@ name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
+
+[[package]]
+name = "typenum"
+version = "1.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
 
 [[package]]
 name = "unicode-ident"
