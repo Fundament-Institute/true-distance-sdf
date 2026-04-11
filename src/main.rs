@@ -352,154 +352,128 @@ pub const KD_CHILD: u32 = 1 << 31;
 
 impl KdTree {
     pub fn new(points: &[(Complex, (usize, usize))]) -> Self {
-        let mut xsort: Vec<_> = Vec::from(points);
-        let mut ysort: Vec<_> = xsort.clone();
-
-        xsort.sort_unstable_by(|(l, _), (r, _)| l.x.partial_cmp(&r.x).unwrap());
-        ysort.sort_unstable_by(|(l, _), (r, _)| l.y.partial_cmp(&r.y).unwrap());
-
+        if points.is_empty() {
+            return KdTree {
+                values: vec![0, 0, 0],
+            };
+        }
         let mut values: Vec<u32> = Vec::new();
 
-        Self::construct(
-            [&xsort, &ysort],
-            0,
-            [0, xsort.len(), 0, ysort.len()],
-            &mut values,
-        );
+        Self::construct(Vec::from(points), 0, &mut values);
         KdTree { values }
     }
 
-    fn emit_child(
-        xysort: [&[(Complex, (usize, usize))]; 2],
-        start: usize,
-        end: usize,
-        axis: usize,
-        values: &mut Vec<u32>,
-    ) {
-        values.push((end - start) as u32);
-        for i in start..end {
-            let pt = xysort[axis][i];
-            values.push(pt.0.x.to_bits());
-            values.push(pt.0.y.to_bits());
-            values.push(pt.1.0 as u32);
-            values.push(pt.1.1 as u32);
-        }
+    fn emit_child(pt: (Complex, (usize, usize)), values: &mut Vec<u32>) {
+        values.push(1 as u32);
+        values.push(pt.0.x.to_bits());
+        values.push(pt.0.y.to_bits());
+        values.push(pt.1.0 as u32);
+        values.push(pt.1.1 as u32);
     }
 
-    fn construct(
-        xysort: [&[(Complex, (usize, usize))]; 2],
-        axis: usize,
-        ranges: [usize; 4],
-        values: &mut Vec<u32>,
-    ) {
+    fn construct(mut chunk: Vec<(Complex, (usize, usize))>, axis: usize, values: &mut Vec<u32>) {
         const EPSILON: f32 = 1e-5;
-
-        // Take this axis range
-        let start = ranges[axis * 2];
-        let end = ranges[(axis * 2) + 1];
-        if start == end {
-            return;
-        }
+        chunk.sort_by(|(l, _), (r, _)| l[axis].partial_cmp(&r[axis]).unwrap());
 
         // Split the range at the median
-        let mut middle = (start + end) / 2;
-        let median = xysort[axis][middle].0[axis];
+        let mut middle = chunk.len() / 2;
+        let median = chunk[middle].0[axis];
 
-        // walk backwards as long as the point is still equal to our median
-        while middle > start && xysort[axis][middle - 1].0[axis] == median {
+        // walk backwards as long as the point is still equal to our median, but if the remaining point count is
+        while middle > 0 && chunk[middle - 1].0[axis] >= median {
             middle -= 1;
         }
+
+        let right = chunk.split_off(middle);
 
         values.push(median.to_bits());
         let l_idx = values.len();
         values.push(0);
         let r_idx = values.len();
         values.push(0);
+
         // Left child is empty
-        if start == middle {
+        if chunk.is_empty() {
             // do nothing
-        } else if middle - start == 1
-            || (xysort[axis][start].0 - xysort[axis][middle - 1].0).squaredMag() < EPSILON
-        {
+        } else if chunk.len() == 1 {
             //If it's 1 point or the end point is less than EPSILON distance from our start point, this is a child.
-            values[l_idx] = values.len() as u32;
-            Self::emit_child(xysort, start, middle, axis, values);
+            values[l_idx] = values.len() as u32 | KD_CHILD;
+            Self::emit_child(chunk[0], values);
         } else {
             values[l_idx] = values.len() as u32;
-            let mut nranges = ranges.clone();
-            nranges[axis * 2] = start;
-            nranges[(axis * 2) + 1] = middle;
-            Self::construct(xysort, (axis + 1) & 1, nranges, values)
+            Self::construct(chunk, (axis + 1) & 1, values);
         }
 
         // Right child is empty
-        if middle == end {
+        if right.is_empty() {
             // do nothing
-        } else if end - middle == 1
-            || (xysort[axis][middle].0 - xysort[axis][end - 1].0).squaredMag() < EPSILON
-        {
-            values[r_idx] = values.len() as u32;
-            Self::emit_child(xysort, middle, end, axis, values);
+        } else if right.len() == 1 {
+            values[r_idx] = values.len() as u32 | KD_CHILD;
+            Self::emit_child(right[0], values);
         } else {
             values[r_idx] = values.len() as u32;
-            let mut nranges = ranges.clone();
-            nranges[axis * 2] = middle;
-            nranges[(axis * 2) + 1] = end;
-            Self::construct(xysort, (axis + 1) & 1, nranges, values)
+            Self::construct(right, (axis + 1) & 1, values);
         }
     }
 
     fn nearest_point(&self, pos: Complex) -> Option<Complex> {
-        let mut idx = 0;
-        let mut axis = 0;
+        let mut best_point = None;
+        let mut best_dist_sq = f32::MAX;
+        let mut stack: Vec<(u32, usize)> = Vec::new(); // (idx, axis)
+        stack.push((0, 0));
 
-        loop {
-            let split = f32::from_bits(self.values[idx]);
-            let pick = if pos[axis] < split { 0 } else { 1 };
-            let mut child = self.values[idx + pick + 1];
-            if child == 0 {
-                child = self.values[idx + ((pick + 1) & 1) + 1];
-            }
+        const ESIZE: usize = 4;
 
-            if child == 0 {
-                break;
-            }
-
-            if (child & KD_CHILD) != 0 {
-                idx = (child & (!KD_CHILD)) as usize;
+        while let Some((idx, axis)) = stack.pop() {
+            if (idx & KD_CHILD) != 0 {
+                // leaf node
+                let idx = (idx & (!KD_CHILD)) as usize;
                 let count = self.values[idx];
                 if count == 0 {
-                    return None;
+                    continue;
                 }
-                let mut nearest = Complex::new(f32::MAX, f32::MAX);
-                let mut lastdist_sq = f32::MAX;
-                // size of each point element, which might be larger than (f32, f32) if auxilliary information exists
-                const ESIZE: usize = 4;
-
                 for i in 0..count as usize {
                     let point = Complex::new(
                         f32::from_bits(self.values[idx + 1 + (i * ESIZE)]),
                         f32::from_bits(self.values[idx + 1 + (i * ESIZE) + 1]),
                     );
-
-                    let dist = (point - pos).squaredMag();
-
-                    // We can skip isBoundaryPoint here because the intersection points are prefiltered
-                    if dist < lastdist_sq {
-                        lastdist_sq = dist;
-                        nearest = point;
+                    let dist_sq = (point - pos).squaredMag();
+                    if dist_sq < best_dist_sq {
+                        best_dist_sq = dist_sq;
+                        best_point = Some(point);
                     }
                 }
-
-                return Some(nearest);
+            } else {
+                // internal node
+                let idx = idx as usize;
+                let split = f32::from_bits(self.values[idx]);
+                let left = self.values[idx + 1];
+                let right = self.values[idx + 2];
+                let dist = pos[axis] - split;
+                if dist * dist < best_dist_sq {
+                    // may need to check both subtrees
+                    let pick = if pos[axis] < split { 0 } else { 1 };
+                    let closer = if pick == 0 { left } else { right };
+                    let farther = if pick == 0 { right } else { left };
+                    // push farther first, then closer (so closer is processed first)
+                    if farther != 0 {
+                        stack.push((farther, (axis + 1) & 1));
+                    }
+                    if closer != 0 {
+                        stack.push((closer, (axis + 1) & 1));
+                    }
+                } else {
+                    // only check the subtree on the side of pos
+                    let pick = if pos[axis] < split { 0 } else { 1 };
+                    let child = self.values[idx + pick + 1];
+                    if child != 0 {
+                        stack.push((child, (axis + 1) & 1));
+                    }
+                }
             }
-
-            idx = child as usize;
-
-            axis = (axis + 1) & 1;
         }
 
-        None
+        best_point
     }
 
     pub fn nearest_circle(
@@ -972,10 +946,30 @@ impl Shape {
         }
     }
 
-    pub fn nbp(&self, root: &Shape, pos: Complex, nearest: &mut Complex, points: &PointTree) {
-        if let Some(near) = points.nearest_point(pos) {
+    pub fn nbp(
+        &self,
+        root: &Shape,
+        pos: Complex,
+        nearest: &mut Complex,
+        kdtree: &PointTree,
+        points: &[(sdf::Complex, (usize, usize))],
+    ) {
+        if let Some(near) = kdtree.nearest_point(pos) {
             *nearest = near;
         }
+
+        let check1 = *nearest;
+
+        /*for (p, _) in points {
+            let dist = (*p - pos).squaredMag();
+
+            // We can skip isBoundaryPoint here because the intersection points are prefiltered
+            if dist < (*nearest - pos).squaredMag() {
+                *nearest = *p;
+            }
+        }
+
+        assert_eq!(check1, *nearest);*/
 
         match self {
             Self::Circle(circle, _, _) => {
@@ -1005,8 +999,8 @@ impl Shape {
             }
             Self::Constant(_, _) => (),
             Self::Composite(f, _) => {
-                f.l.nbp(root, pos, nearest, points);
-                f.r.nbp(root, pos, nearest, points);
+                f.l.nbp(root, pos, nearest, kdtree, points);
+                f.r.nbp(root, pos, nearest, kdtree, points);
             }
         }
     }
@@ -1016,15 +1010,23 @@ impl Shape {
         centroid: sdf::Complex,
         nearest: sdf::Complex,
         diagonal: f32,
-        points: &PointTree,
+        kdtree: &PointTree,
+        points: &[(sdf::Complex, (usize, usize))],
     ) -> Self {
         let mut marked: HashSet<usize> = HashSet::new();
         let r2 = diagonal * diagonal;
 
-        points.nearest_circle(nearest, diagonal, |(_, (l, r))| {
+        /*kdtree.nearest_circle(nearest, diagonal, |(_, (l, r))| {
             marked.insert(*l as usize);
             marked.insert(*r as usize);
-        });
+        });*/
+        for (pos, (l, r)) in points {
+            let dist_sq = (*pos - nearest).squaredMag();
+            if dist_sq <= r2 {
+                marked.insert(*l);
+                marked.insert(*r);
+            }
+        }
 
         let r = diagonal + (centroid - nearest).mag();
 
@@ -1054,7 +1056,6 @@ impl Shape {
                     x
                 } else {
                     Self::Constant(x.eval(centroid), idx)
-                    //Self::Constant(x.eval(centroid), idx)
                 }
             }
             x @ Self::Constant(_, _) => x,
@@ -1148,19 +1149,25 @@ impl Shape {
         match self {
             Self::Circle(c, _, idx) if !marked.contains(idx) => {
                 let pos = sdf::diskNBP(*c)(centroid);
-                if (pos - centroid).squaredMag() < r2 && is_boundary_point(root, pos) {
+                if (pos - centroid).squaredMag() < r2
+                /*&& is_boundary_point(root, pos)*/
+                {
                     marked.insert(*idx);
                 }
             }
             Self::HalfPlane(hp, _, idx) if !marked.contains(idx) => {
                 let pos = sdf::halfPlaneNBP(*hp)(centroid);
-                if (pos - centroid).squaredMag() < r2 && is_boundary_point(root, pos) {
+                if (pos - centroid).squaredMag() < r2
+                /*&& is_boundary_point(root, pos)*/
+                {
                     marked.insert(*idx);
                 }
             }
             Self::Bezier(b, _, idx) if !marked.contains(idx) => {
                 for pos in b.findLocallyNearestPoints(centroid) {
-                    if (pos - centroid).squaredMag() < r2 && is_boundary_point(root, pos) {
+                    if (pos - centroid).squaredMag() < r2
+                    /*&& is_boundary_point(root, pos)*/
+                    {
                         marked.insert(*idx);
                     }
                 }
@@ -1363,6 +1370,12 @@ impl ApplicationHandler for App {
             contents: blank_points.as_bytes(),
         });
 
+        let kdtree = driver.device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("KDTree"),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            contents: self.kdtree.values.as_bytes(),
+        });
+
         let atomic_offset = driver.device.create_buffer_init(&BufferInitDescriptor {
             label: Some("Atomic total offset"),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
@@ -1373,7 +1386,7 @@ impl ApplicationHandler for App {
         use euclid::default::Point2D;
         use euclid::default::Size2D;
 
-        self.quad_v.resize(1 << 15, 0);
+        self.quad_v.resize(1 << 17, 0);
         let timer = std::time::Instant::now();
         let mut hmap = HashMap::new();
         build_quadtree(
@@ -1384,6 +1397,7 @@ impl ApplicationHandler for App {
             &mut self.quad_v,
             &self.composite,
             &self.kdtree,
+            &self.points,
             &mut hmap,
         );
         let diff = std::time::Instant::now() - timer;
@@ -1416,7 +1430,8 @@ impl ApplicationHandler for App {
             },
             BindGroupEntry {
                 binding: 1,
-                resource: points.as_entire_binding(),
+                //resource: points.as_entire_binding(),
+                resource: kdtree.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 2,
@@ -1521,6 +1536,7 @@ impl ApplicationHandler for App {
                         &mut self.quad_v,
                         &self.composite,
                         &self.kdtree,
+                        &self.points,
                         &mut hmap,
                     );
                     let diff = std::time::Instant::now() - timer;
@@ -1812,12 +1828,13 @@ pub fn build_quadtree(
     area: euclid::default::Box2D<f32>,
     v: &mut Vec<u32>,
     sdf: &Shape,
-    points: &PointTree,
+    kdtree: &PointTree,
+    points: &[(sdf::Complex, (usize, usize))],
     hmap: &mut HashMap<Shape, u32>,
 ) -> u32 {
     use euclid::default::Box2D;
     use euclid::default::Point2D;
-    const MIN_SIZE: f32 = 16.0;
+    const MIN_SIZE: f32 = 8.0;
     let centroid = area.center(); //+ Vector2D::new(5.0, 5.0);
     let mut nearest = Complex::new(f32::MAX, f32::MAX);
 
@@ -1826,11 +1843,12 @@ pub fn build_quadtree(
     //    nearest = nearest;
     //}
 
-    sdf.nbp(&sdf, centroid.into(), &mut nearest, points);
+    sdf.nbp(&sdf, centroid.into(), &mut nearest, kdtree, points);
     let mut trimmed = sdf.trim_shape(
         sdf::Complex::new(centroid.x, centroid.y),
         nearest,
         Complex::new(area.width(), area.height()).mag(),
+        kdtree,
         points,
     );
 
@@ -1857,7 +1875,7 @@ pub fn build_quadtree(
 
         let begin = idx as usize;
         for i in begin..begin + 4 {
-            v[i] = build_quadtree(q[i - begin], v, &sdf, points, hmap);
+            v[i] = build_quadtree(q[i - begin], v, &sdf, kdtree, points, hmap);
         }
 
         idx
@@ -1911,7 +1929,7 @@ fn gen_shape(pos: Complex, radius: f32, rng: &mut Xoshiro128PlusPlus) -> Shape {
     match 0 {
         0 => Shape::circle(
             (range.sample(rng) + pos.x, range.sample(rng) + pos.y),
-            rng.random_range(radius * 0.12..=radius * 0.25),
+            rng.random_range(radius * 0.25..=radius * 0.5),
         ),
         1 => Shape::halfplane(
             (rng.random_range(0.0..=pos.y), 1.0),
@@ -1977,11 +1995,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //let mut composite = ((-((-hp1) | hp2)) & ((-c1) & c2)) | (b1 | b2);
 
     let mut rng = Xoshiro128PlusPlus::from_seed(2873493u128.to_le_bytes());
-    let mut composite = gen_composite_shape(10, 50.0, Complex::new(200.0, 0.0), &mut rng);
+    let mut composite = gen_composite_shape(50, 50.0, Complex::new(200.0, 0.0), &mut rng);
     //let mut composite = ((-((-hp1) | hp2)) | (c2));
     //let mut composite = ((hp1) & -hp2) | (c2);
 
-    //let mut composite = gen_grid_shape(7, 7, 20.0, Complex::new(-200.0, -200.0));
+    //let mut composite = gen_grid_shape(10, 10, 20.0, Complex::new(-200.0, -200.0));
     let box1 = Shape::halfplane((30.0 - (-30.0), (-200.0) - 200.0), 0.5);
     let box2 = Shape::halfplane((30.0 - (-30.0), 200.0 - (-200.0)), -0.5);
     //let mut composite = box1 | box2;
